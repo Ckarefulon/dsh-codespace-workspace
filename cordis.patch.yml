@@ -1,0 +1,11 @@
+# dsh-codespace-workspace — loader rows.
+#
+# The row `id` is the settings namespace this plugin persists to, and it must
+# stay equal to the package name: the client repeats both as literals.
+#
+# `config` is deliberately empty. Every field of `Config` is volatile, so the
+# values the user changes live in the profile's own patch layer and survive an
+# upgrade of this package; restating them here would shadow those edits.
+- insert:
+    - id: dsh-codespace-workspace
+      name: dsh-codespace-workspace

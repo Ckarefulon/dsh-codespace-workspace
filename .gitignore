@@ -1,0 +1,20 @@
+# Build output / dependencies (none — this plugin has no build step)
+node_modules/
+
+# Local scratch: extracted DSH sources, test harnesses, API dumps
+tmp/
+tmp-*/
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Secrets: never commit a token or key
+.env
+.env.*
+*.pem
+*.key
+id_rsa*

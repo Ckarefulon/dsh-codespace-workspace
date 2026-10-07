@@ -1,0 +1,203 @@
+# dsh-codespace-workspace
+
+把 **GitHub Codespace 直接当作一个 DSH 工作区**使用。本地 DSH 连接云端
+Codespace，Agent 在 Codespace 里读写文件、执行命令。
+
+这不是一个通用的 SSH 远程连接插件：Codespace 就是工作区本身。它不往 DSH 的
+SSH 主机列表里塞任何东西，因此不会和其他云工作区插件冲突。
+
+```
+┌─────────────── 本地 DSH ───────────────┐        ┌────── GitHub Codespace ──────┐
+│  侧边栏工作区行（云朵图标）              │        │                              │
+│    ▶️ / ⏸️ / 🕐  ← 启停 + 自动暂停倒计时 │  SSH   │  /workspaces/<repo>          │
+│                                        │ ─────► │    read / write / edit       │
+│  Agent 会话（cwd = 占位目录）           │        │    glob / grep / bash        │
+└────────────────────────────────────────┘        └──────────────────────────────┘
+```
+
+## 功能
+
+### 设置页：Codespace
+
+在 DSH 设置里新增一栏 **Codespace**：
+
+| 设置项 | 说明 |
+|---|---|
+| GitHub 用户名 | 用于校验与展示；留空则从 token 读取登录名 |
+| 默认分支 | 新建 Codespace 时使用，默认 `main` |
+| 自动暂停等待时间（分钟） | 一轮对话结束后开始倒计时，默认 30 |
+| SSH 密钥（可选） | 仅保存路径；值永不回显，只显示「已设置 / 未设置」 |
+| 始终显示云端工作区按钮 | 开关，默认关；开启后按钮不再跟随 hover 隐藏 |
+| 自动初始化空仓库 | 开关，默认开；空仓库先提交一个 README 再建 Codespace |
+| README 初始内容 | 可选；留空则创建空 README |
+
+设置通过 DSH 标准设置存储（`Config` + `.volatile()` + settings 服务）持久化，
+写在 profile 的 `cordis.patch.yml` 里，不占用 `localStorage`，升级不丢。
+
+### 工作区列表
+
+- 云端工作区使用**云朵图标**，固定不变，不随 Codespace 状态变化。
+- 操作按钮位于**倒数第三个**——在三个点菜单和新建对话按钮之前。
+- 显示逻辑跟随宿主默认行为：不 hover 时隐藏；打开「始终显示」后常显。
+- 按钮状态：
+
+| 状态 | 图标 | 悬停提示 | 点击 |
+|---|---|---|---|
+| 已停止 | ▶️ | 启动 Codespace | 启动 |
+| 运行中 | ⏸️ | 暂停 Codespace | 暂停 |
+| 倒计时中 | 🕐 | 还剩 X 分钟自动暂停 | 取消倒计时 |
+| 启动/暂停中 | 转圈 | — | 不可点 |
+
+**双击时钟图标 = 立即暂停。**
+
+工作区 hover 卡片中的「工作区位置」一行改为显示 **Codespace 的名字**。
+
+### 新建云端工作区
+
+只有一个窗口，分步显示，不弹一堆窗：
+
+1. 拉取 GitHub 仓库列表，选择仓库
+2. 检查该仓库的 Codespace：多个 → 选择；一个 → 直接用；没有 → 创建
+3. 创建前检查 prebuild：没有则窗口内提示「未配置预构建，创建可能较慢」，
+   给出 `取消` / `直接创建`
+4. 空仓库 → 自动提交一个空 README，然后继续创建
+5. 机器规格可选，默认最小
+6. 启动失败 → 窗口内报错，可重试
+
+### 生命周期
+
+- **DSH 启动时**：不自动启动任何 Codespace。检查上次遗留的运行中 Codespace 并
+  提示用户（带「停止」按钮），但不自动停。
+- **退出 DSH 时**：尝试自动关闭所有本插件管理的 Codespace。
+- **自动暂停**：一轮对话结束后开始倒计时；倒计时期间用户发新消息 → 取消倒计时，
+  等 Agent 干完活重新计时；点时钟 → 取消；双击时钟 → 立即暂停。
+
+### Git
+
+Agent 拥有完整的 `git` 命令执行能力。**插件不干预 Git 操作，不封装 push 逻辑。**
+只在创建会话时向系统提示词注入一条规则，告诉 Agent 这是云端 Codespace 工作区、
+改动完成后请 `git push` 回仓库——不需要每次提醒。
+
+### 多工作区
+
+每个云端工作区独立控制自己的 Codespace 启停，互不干扰。
+
+### 删除 Codespace
+
+在三个点菜单里，与「删除工作区」**分开**。点击后弹确认框，确认后删除。
+
+## 前置条件
+
+| 依赖 | 必需 | 说明 |
+|---|---|---|
+| `git` | 是 | Agent 用它 push 回仓库 |
+| `ssh` | 是 | 连接 Codespace 的数据通道 |
+| `gh`（GitHub CLI） | 推荐 | 用于 `gh codespace ssh`；**未安装时插件仍可用**，改用你在设置里配置的 SSH 别名 |
+| GitHub token | 是 | 控制面（REST API）。取值顺序：设置 → `GITHUB_TOKEN` → `gh auth token` |
+
+> **本机现状**：`gh` 未安装，`git` 与 `ssh` 已安装。插件会在设置页明确显示这一
+> 状态，并在缺少 `gh` 时回退到 SSH 别名，而不是直接失败。
+
+所需 GitHub 权限范围：`codespace`、`repo`。
+
+## 安装
+
+```powershell
+# 1. 克隆到工作区
+git clone <this-repo> dsh-codespace-workspace
+
+# 2. 装进当前 profile（只改写 profile 的 package.json dependencies 与 lockfile）
+dsh plugin --profile desktop add "link:<绝对路径>\dsh-codespace-workspace"
+
+# 3. 把包名登记进 dsh.profile.bundles，否则不会被挂载
+#    编辑 %USERPROFILE%\.dsh\profiles\desktop\package.json
+#    在 dsh.profile.bundles 数组里加入 "dsh-codespace-workspace"
+
+# 4. 重启 DSH（插件文件改动不会热生效）
+```
+
+`dsh plugin add` 只改 `dependencies` 与 `pnpm-lock.yaml`，**不会**登记
+`dsh.profile.bundles`，第 3 步必须手工做。它会报一条 peer dependency 警告
+（`@deepseek-ai/cordis`、`@deepseek-ai/schemastery` 由宿主提供），可以忽略。
+
+装完可以确认插件已被解析并导入。注意 `desktop` profile 由 Electron 应用独占管理，
+CLI 对它只允许 `dsh plugin`，跑 `--dump-config-schema` 会报
+`profile "desktop" is managed exclusively by the Electron application`。所以要用一个
+临时 profile 来验证（下面的 `cscheck` 只是举例，验证完删掉即可）：
+
+```powershell
+# 建一个只含 dsh-base 的临时 profile
+dsh plugin --profile cscheck add "@deepseek-ai/dsh-base@0.2.0-rc.2"
+dsh plugin --profile cscheck add "link:<绝对路径>\dsh-codespace-workspace"
+# 手工把 "dsh-codespace-workspace" 加进该 profile 的 dsh.profile.bundles
+# 然后 dump：它会真的 import() 每个插件的 main，并用其 Config 生成 JSON Schema
+dsh --profile cscheck --dump-config-schema | Select-String dsh-codespace-workspace
+```
+
+输出里应出现 `"const":"dsh-codespace-workspace"` 指向一个 `config<N>` 定义，
+该定义包含全部 8 个设置字段、正确的默认值、`"volatile":true`，以及
+`githubToken` 上的 `"role":"secret"`。这证明模块能加载、`Config` 合法。
+
+确认无误后重启 DSH，设置页就会出现 **Codespace**。
+
+## 架构
+
+```
+lib/
+  shared.js              Host/Client 之间的冻结契约（动作名、状态映射、脱敏）
+  index.js               Host 入口：apply() / Config / inject / 装配
+  host/
+    github.js            GitHub REST 客户端 + token 解析
+    gh.js                gh CLI 探测与调用（缺失时优雅降级）
+    codespaces.js        生命周期、机器规格、prebuild、空仓库、自动暂停计时器
+    transport.js         远程执行与文件读写（base64，无字符串插值）
+    remote-tools.js      为 Codespace 会话注册远程工具（agent.ctx 作用域）
+    session.js           agent/created、提示词注入、倒计时、退出停止
+    routes.js            RPC 路由
+  client.js              浏览器半边：设置页 + 行增强 + 多步窗口
+locale/{en,zh}.json      文案
+```
+
+### 关键设计决策
+
+1. **占位目录**：Codespace 工作区在 DSH 自己的 registry 里登记为一个真实存在的
+   本地目录 `<DSH_HOME>/codespaces/<name>/`（`dsh-workspace` 要求路径存在且可
+   `realpath`）。会话 `cwd` 就是这个路径，DSH 的工作区/会话机制原样工作。
+2. **按 cwd 路由，不替换全局服务**：任何会话只要 `cwd` 落在占位根目录下，就是
+   Codespace 会话。其余会话与其他插件完全不受影响。
+3. **按 Agent 注册工具**：在 `agent/created` 时，把远程实现注册到 `agent.ctx`，
+   用 `tools.restrict()` 屏蔽本地对应工具。这是 DSH 支持的 per-agent 扩展点。
+4. **一行提示词**：只在会话创建时注入一条规则，不做每轮提醒。
+5. **退出即停**：退出时停止所有本插件管理的 Codespace。挂点是 `ctx.effect` 的
+   cleanup —— `runProfile` 的 dispose 会 await 根 fiber 的 `fiber.dispose()`，而
+   cordis 会并发 await 每一个 effect disposer（已核对 `fiber.ts` 的 `_unload`）。
+   预算很紧：进程 5 秒后强退，崩溃路径只有 2 秒。因此 `stopAll()` 是幂等的、用
+   `Promise.allSettled` 并发发出、单个请求 3.5 秒超时、且**绝不 reject**（reject 的
+   disposer 会让 `runProfile` 抛 `AggregateError`）。没有停成功的名字写进
+   `pending-stop.json`，下次启动的“残留 Codespace”提示会一并列出。
+
+## 已知限制
+
+- 工作区行**没有官方插槽**。DSH 的 `ProjectRowItem` 把操作按钮和文件夹图标写死了，
+  因此云朵图标、启停按钮、hover 文案三处通过 DOM 增强实现（与 `dsh-pet` 处理设置
+  导航图标同一手法）。做法是只注入、不删除 React 拥有的节点，并且全部打上
+  `data-dsh-codespace-*` 标记以便撤销。宿主改版可能影响它。已核对：客户端运行时的
+  插槽目录共 90 个，其中有 `sidebar.workspaces.session.menu.item`，但**没有**工作区行
+  的菜单插槽，且 `ui-workspace` 自己的模块注释写明工作区行菜单“只有重命名/删除”。
+- 远程工具以文本方式传输文件（base64），大文件不适合；大仓库建议让 Agent 在
+  Codespace 内直接操作。
+- `gh` 缺失时依赖用户自行配置 SSH 别名。设置项名为「SSH 密钥」，但**私钥路径无法
+  指定主机**，所以该值被当作 `~/.ssh/config` 的主机别名使用；填成路径会得到一条
+  说明如何修正的错误，而不是把路径当主机名交给 `ssh`。
+- 未在本机实测的部分：GitHub REST 与 `gh` 的真实响应（本机没装 `gh`、无 token），
+  以及真实 SSH 数据面（没有已配置的 Codespace 目标）。命令拼装本身已用真实 bash
+  验证：20 组逐字节往返 + 5 组注入载荷，均保持为单个 shell 词且无副作用。
+
+## 文档
+
+- [`docs/CONTRACT.md`](docs/CONTRACT.md) —— 实现契约：经过核实的 DSH API 事实、
+  冻结的 RPC 契约、模块接口、以及每条未经核实项的处理分支。
+
+## 许可
+
+MIT

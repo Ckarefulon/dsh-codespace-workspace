@@ -1,0 +1,15 @@
+# Normalize every text file to LF in the repository. The plugin ships no build
+# step, so the committed bytes are the bytes the loader evaluates; keeping them
+# LF avoids a whole-file diff on every checkout and keeps the client bundle
+# byte-stable across platforms.
+* text=auto eol=lf
+
+# Binary assets are never touched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# GitHub language stats: the shipped code is JavaScript.
+*.js linguist-language=JavaScript

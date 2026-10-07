@@ -1,0 +1,62 @@
+{
+  "name": "dsh-codespace-workspace",
+  "version": "0.1.0",
+  "description": "Use a GitHub Codespace directly as a DSH workspace: the agent reads, writes and runs commands inside the cloud Codespace.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json"
+  },
+  "files": [
+    "lib",
+    "locale",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "icon": "./icon.svg",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "codespace",
+    "codespaces",
+    "github",
+    "remote-workspace"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0 <5",
+    "@deepseek-ai/schemastery": ">=3.18.0 <4"
+  },
+  "meta": {
+    "title": "Codespace 云端工作区",
+    "description": "把 GitHub Codespace 当作 DSH 工作区：Agent 在云端 Codespace 里读写文件、执行命令。"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ]
+    }
+  }
+}
