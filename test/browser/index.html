@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>dsh-codespace-workspace — DOM augmentation harness</title>
+<style>
+  /* The host's real metrics, copied from dsh-client-ui-workspace so the
+     reveal/hide mechanics behave exactly as in the app. The hash prefix is
+     per-build; these are the shipped values. */
+  .hIlkoa_folder { display: none; }
+  .hIlkoa_projectRow:hover .hIlkoa_folder { display: none; }
+  .hIlkoa_rowActions { flex: none; align-items: center; gap: 10px; display: none; }
+  .hIlkoa_projectRow:hover .hIlkoa_rowActions,
+  .hIlkoa_sessionRow:hover .hIlkoa_rowActions,
+  .hIlkoa_projectRow.hIlkoa_menuOpen .hIlkoa_rowActions { display: inline-flex; }
+  .hIlkoa_iconButton { border-radius: var(--dsw-radius-xs, 4px); cursor: pointer; width: 16px; height: 16px;
+    color: var(--dsw-alias-label-tertiary, #888); background: 0 0; border: none; flex: none;
+    justify-content: center; align-items: center; padding: 0; display: inline-flex; }
+  .hIlkoa_slot { width: 16px; height: 20px; flex: none; justify-content: center; align-items: center; display: inline-flex; }
+  .hIlkoa_hoverContent { flex-direction: column; gap: 8px; display: flex; }
+  .hIlkoa_hoverPath { color: #cfd3d6; word-break: break-all; font-size: 12px; line-height: 16px; }
+
+  /* WorkspaceBrowser module — the section header and its icon row. */
+  ._9lTDKa_sectionHeader { box-sizing: border-box; border-radius: 8px; height: 36px;
+    color: var(--dsw-alias-label-tertiary, #888); flex: none; justify-content: flex-end;
+    align-items: center; gap: 4px; margin-bottom: 4px; padding-left: 4px; display: flex; overflow: hidden; }
+  ._9lTDKa_sectionLabel { max-width: 45%; line-height: 20px; flex: none; overflow: hidden; }
+  ._9lTDKa_searchSlot { box-sizing: border-box; min-width: 0; max-width: 28px; flex: 1;
+    align-items: center; margin-left: auto; display: flex; }
+  ._9lTDKa_headerActions { opacity: 1; visibility: visible; max-width: 60px; flex: none;
+    align-items: center; gap: 4px; display: flex; overflow: hidden; }
+  ._9lTDKa_headerActionsHidden { opacity: 0; visibility: hidden; pointer-events: none; max-width: 0; }
+  ._9lTDKa_iconButton { border-radius: 4px; cursor: pointer; width: 16px; height: 16px;
+    color: #888; background: 0 0; border: none; flex: none; justify-content: center;
+    align-items: center; padding: 0; display: inline-flex; }
+  ._9lTDKa_iconButton:hover { color: #fff; }
+  ._9lTDKa_rail ._9lTDKa_headerActions { max-width: none; }
+  ._9lTDKa_rail ._9lTDKa_iconButton { border-radius: 8px; width: 36px; height: 36px; color: #fff; }
+  body { font: 13px system-ui; background: #1b1d1f; color: #eee; margin: 0; padding: 12px; }
+  #report { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; margin-top: 12px; }
+  .ok { color: #5fd75f; } .fail { color: #ff6b6b; } .info { color: #9bb8ff; }
+  #sidebar { width: 320px; border: 1px solid #333; padding: 8px; }
+</style>
+</head>
+<body>
+<div id="sidebar">
+  <!-- The workspace section header: label, search slot, then the icon row. -->
+  <div class="_9lTDKa_sectionHeader">
+    <span class="_9lTDKa_sectionLabel _9lTDKa_wide">工作区</span>
+    <div class="_9lTDKa_searchSlot">
+      <div class="_9lTDKa_search"><button type="button" class="_9lTDKa_searchButton" aria-label="搜索会话"><svg width="14" height="14"></svg></button></div>
+    </div>
+    <div class="_9lTDKa_headerActions">
+      <button type="button" class="_9lTDKa_iconButton _9lTDKa_wide" aria-label="视图选项"><svg width="16" height="16"></svg></button>
+      <button type="button" class="_9lTDKa_iconButton" aria-label="添加工作区"><svg width="16" height="16"></svg></button>
+    </div>
+  </div>
+
+  <div class="hIlkoa_projectRow" data-row-key="workspace:ws-1" role="treeitem" aria-expanded="true">
+    <span class="hIlkoa_slot hIlkoa_folder"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M1 3h5l1 2h8v9H1z"/></svg></span>
+    <span class="hIlkoa_slot hIlkoa_chevron"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5z"/></svg></span>
+    <span class="hIlkoa_projectText"><span class="hIlkoa_title">my-box</span></span>
+    <span class="hIlkoa_rowActions">
+      <button type="button" class="hIlkoa_iconButton" aria-label="Workspace actions"><svg width="16" height="16"></svg></button>
+      <button type="button" class="hIlkoa_iconButton" aria-label="New session"><svg width="16" height="16"></svg></button>
+    </span>
+  </div>
+
+  <div class="hIlkoa_projectRow" data-row-key="workspace:ws-local" role="treeitem" aria-expanded="false">
+    <span class="hIlkoa_slot hIlkoa_folder"><svg width="16" height="16"></svg></span>
+    <span class="hIlkoa_slot hIlkoa_chevron"><svg width="16" height="16"></svg></span>
+    <span class="hIlkoa_projectText"><span class="hIlkoa_title">local-project</span></span>
+    <span class="hIlkoa_rowActions">
+      <button type="button" class="hIlkoa_iconButton" aria-label="Workspace actions"><svg width="16" height="16"></svg></button>
+      <button type="button" class="hIlkoa_iconButton" aria-label="New session"><svg width="16" height="16"></svg></button>
+    </span>
+  </div>
+
+  <div class="hIlkoa_sessionRow" data-row-key="session:s-1" role="treeitem">
+    <span class="hIlkoa_rowActions"><button type="button" class="hIlkoa_iconButton" aria-label="Session actions"><svg width="16" height="16"></svg></button></span>
+  </div>
+</div>
+
+<!-- The hover card is a portal on document.body, exactly as the host renders it. -->
+<div id="hovercard" style="display:none">
+  <div class="hIlkoa_hoverContent">
+    <div class="hIlkoa_hoverTitle">my-box</div>
+    <div class="hIlkoa_hoverPath">C:\Users\Vxiao\.dsh\codespaces\my-box</div>
+    <div class="hIlkoa_hoverTime">Created 2026/01/01 10:00</div>
+  </div>
+</div>
+
+<pre id="report"></pre>
+<script type="module" src="./harness.js"></script>
+</body>
+</html>

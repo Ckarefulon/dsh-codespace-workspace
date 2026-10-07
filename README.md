@@ -36,6 +36,8 @@ SSH 主机列表里塞任何东西，因此不会和其他云工作区插件冲�
 
 ### 工作区列表
 
+- 新建云端工作区的按钮放在**工作区分组标题栏的图标行里**，与 DSH 原有的图标
+  同地位，紧挨在「添加工作区」的**左边**——不是另做一个独立控件。
 - 云端工作区使用**云朵图标**，固定不变，不随 Codespace 状态变化。
 - 操作按钮位于**倒数第三个**——在三个点菜单和新建对话按钮之前。
 - 显示逻辑跟随宿主默认行为：不 hover 时隐藏；打开「始终显示」后常显。
@@ -154,8 +156,12 @@ lib/
     remote-tools.js      为 Codespace 会话注册远程工具（agent.ctx 作用域）
     session.js           agent/created、提示词注入、倒计时、退出停止
     routes.js            RPC 路由
-  client.js              浏览器半边：设置页 + 行增强 + 多步窗口
+  client.js              浏览器半边：设置页 + DOM 增强（标题栏按钮 / 行 / 菜单）+ 多步窗口
 locale/{en,zh}.json      文案
+test/
+  check.mjs              Node 侧自检（不需要浏览器、token、gh）
+  serve.mjs              浏览器自检的静态服务器
+  browser/               浏览器自检：index.html + harness.js + react-lite.js
 ```
 
 ### 关键设计决策
@@ -176,14 +182,52 @@ locale/{en,zh}.json      文案
    disposer 会让 `runProfile` 抛 `AggregateError`）。没有停成功的名字写进
    `pending-stop.json`，下次启动的“残留 Codespace”提示会一并列出。
 
+## 验证
+
+两套自检，都不需要 token、`gh` 或真实 Codespace：
+
+```bash
+# Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
+node test/check.mjs                # 75 项，全通过
+
+# 浏览器侧：在真实 DOM 里跑真实 bundle，对着宿主 markup/CSS 的忠实副本
+node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
+                                   # 114 项，全通过
+```
+
+浏览器侧覆盖的是 Node 里没法验证的部分：真实属性反射、`:hover` 驱动的 CSS、
+`MutationObserver` 合并、portal 到 `document.body` 的菜单。它实际抓到过两个 bug：
+
+- **时钟双击失效**：倒计时行上，第一次点击会立刻发出「取消倒计时」（这是刻意的，
+  因为那里双击没有别的含义），于是剩余时间归零；而 `dblclick` 的处理里原本用
+  「剩余时间 > 0」做守卫，结果第二次点击被静默丢弃——需求里的「双击时钟 = 立即暂停」
+  从来没生效过。守卫已改为判断**状态**而不是剩余时间。
+- **运行中单击不生效**：`beginClickWindow` 只清了计时器并重绘，从来没有真正发出
+  被延后的那个动作，所以运行中的行单击一次什么都不会发生。现在窗口关闭时会按
+  **当前**记录重新推导动作（轮询可能在这期间落地），并丢弃已经进入 busy 的记录。
+
+另外它抓到过一个真实的时序问题：`alwaysShowCloudButton` 原本只在设置页挂载时才
+读取，因此全新启动时行增强读到的是 `null`，开关实际上不生效。现在由行增强模块
+自己在拿到 owner claim 时读一次设置。
+
 ## 已知限制
 
-- 工作区行**没有官方插槽**。DSH 的 `ProjectRowItem` 把操作按钮和文件夹图标写死了，
-  因此云朵图标、启停按钮、hover 文案三处通过 DOM 增强实现（与 `dsh-pet` 处理设置
-  导航图标同一手法）。做法是只注入、不删除 React 拥有的节点，并且全部打上
-  `data-dsh-codespace-*` 标记以便撤销。宿主改版可能影响它。已核对：客户端运行时的
+- **工作区分组标题栏的图标行、以及工作区行，都没有官方插槽**。DSH 把「添加工作区」
+  按钮和 `ProjectRowItem` 的操作按钮、文件夹图标全部写死，因此以下四处通过 DOM 增强
+  实现（与 `dsh-pet` 处理设置导航图标同一手法）：标题栏里的新建按钮、行首云朵图标、
+  行内启停按钮、hover 文案（外加菜单里的「删除 Codespace…」）。做法是只注入、不删除
+  React 拥有的节点，全部打上 `data-dsh-codespace-*` 标记，一个合并的
+  `MutationObserver`，dispose 时完整撤销。宿主改版可能影响它。已核对：客户端运行时的
   插槽目录共 90 个，其中有 `sidebar.workspaces.session.menu.item`，但**没有**工作区行
-  的菜单插槽，且 `ui-workspace` 自己的模块注释写明工作区行菜单“只有重命名/删除”。
+  的菜单插槽，也没有标题栏图标行的插槽；`sidebar.footer.action` 是真实存在的插槽，
+  但它把控件放在侧边栏底部，不符合「与原有三个图标同地位、紧挨添加工作区左侧」的要求。
+  标题栏的 `_sectionHeader` / `_headerActions` 两个类名后缀经核对为
+  `dsh-client-ui-workspace` 独有，不会误匹配。
+- 标题栏图标行是 `justify-content:flex-end` + `max-width:60px`（正好放下三个 16px
+  图标）。加进第四个控件需要放宽容器宽度，但放宽规则带了
+  `:not([class*="_headerActionsHidden"])`，以免盖掉宿主自己在展开搜索框时的收起行为。
+  另外「添加工作区」按钮只在目录流插槽被占用时才渲染，所以插入位置是「最后一个子元素
+  之前」而不是固定下标。
 - 远程工具以文本方式传输文件（base64），大文件不适合；大仓库建议让 Agent 在
   Codespace 内直接操作。
 - `gh` 缺失时依赖用户自行配置 SSH 别名。设置项名为「SSH 密钥」，但**私钥路径无法

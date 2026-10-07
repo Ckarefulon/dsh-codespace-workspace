@@ -179,16 +179,53 @@ the registration throws `slot "<name>" is not declared`.
 | Slot | Kind | Use |
 |---|---|---|
 | `settings.section` | list | our **Codespace** settings page (`id`, `order`, `label: () => …`) |
-| `shell.overlay` | list | the single multi-step **new cloud workspace** window |
+| `shell.overlay` | list | the single multi-step **new cloud workspace** window and the delete dialog |
 | `sidebar.workspaces` | single | owned by `ui-workspace`; **do not take it** |
-| `sidebar.footer.action` | list | fallback surface if row DOM patch is unavailable |
 
 Kind declarations verified: `settings.section` is `{kind:"list", scope:"root"}`
 declared by `ui-settings-general` (`lib/client.js` ≈L1136); `shell.overlay` is
-`{kind:"list", scope:"root"}` declared by `ui-layout` (≈L617);
-`sidebar.footer.action` is `{kind:"list", scope:"root"}` declared by
-`ui-sidebar` (≈L515). Registering a `list` entry **without** an `id` collapses
-it to a single always-present cell — always pass `id` and `order`.
+`{kind:"list", scope:"root"}` declared by `ui-layout` (≈L617). Registering a
+`list` entry **without** an `id` collapses it to a single always-present cell —
+always pass `id` and `order`.
+
+**The new-cloud-workspace launcher is deliberately NOT a slot entry.** The
+requirement is that it sits in the workspace section's own header icon row as a
+peer of the host's controls, immediately left of 添加工作区 — and there is no
+slot for that row (see below). `sidebar.footer.action` *is* a real declared slot
+(by `ui-sidebar`, ≈L515, `{kind:"list", scope:"root"}`) and was used in an
+earlier revision, but it puts the control in the sidebar footer, which is not
+where the requirement places it. It is therefore a DOM augmentation instead.
+
+### The workspace section header has NO slot (verified negative finding)
+
+`dsh-client-ui-workspace/lib/client.js` (`WorkspaceBrowser`, ≈L150370):
+
+```
+<div class="<hash>_sectionHeader">            flex, height:36px, gap:4px, justify-content:flex-end
+  {wide && <span class="<hash>_sectionLabel">…</span>}
+  {wide && <div class="<hash>_searchSlot">…</div>}
+  <div class="<hash>_headerActions">          gap:4px, max-width:60px, overflow:hidden
+    {wide && <ViewOptionsMenu/>}              Tooltip > button.<hash>_iconButton
+    {directoryFlowAvailable && <Tooltip>      button.<hash>_iconButton, aria-label="添加工作区"
+      <button …/>
+    </Tooltip>}
+  </div>
+</div>
+```
+
+* The icon row is `headerActions`; its **last element child is the host's "+"**
+  (a real `<button>`) whenever `directoryFlowAvailable` is true. It is absent
+  when the directory-flow slot is unoccupied, so the insert position must be
+  "before the last child" with a fallback, never a fixed index.
+* `headerActionsHidden` (`opacity:0;visibility:hidden;max-width:0`) is added
+  while the search box is expanded. `max-width:60px` fits exactly three 16px
+  icons at 4px gaps (56px), so our third control needs the container widened —
+  but the widening rule **must not** out-specify the host's own collapse, hence
+  `:not([class*="_headerActionsHidden"])`.
+* Rail mode enlarges the host's controls to 36px via `.<hash>_rail .<hash>_iconButton`;
+  our button needs a matching rule or it looks undersized next to its peers.
+* `_sectionHeader` / `_headerActions` are **unique to this package** (checked
+  across every extracted UI bundle), so suffix matching cannot collide.
 
 ### The workspace row has NO slot (verified negative finding — twice over)
 
@@ -440,9 +477,22 @@ Managed   = { workspaceId, title, path, codespace, state, busy,
               autoPauseRemainingMs, autoPauseDeadline }
 ```
 
-Client-side polling: `workspaces` every 4 s while the sidebar is mounted, plus
-`status` once on settings-page mount. Poll with `setTimeout` chains (never
-overlapping), and stop on dispose.
+Client-side polling: `workspaces` every 4 s **while the workspace section is on
+screen**, plus `status` once on settings-page mount. Poll with `setTimeout`
+chains (never overlapping), and stop on dispose.
+
+The poll is not free — with at least one managed workspace every tick calls the
+Codespaces list API — so it is gated on an explicit owner claim: the store's
+`subscribe(listener, owns)` increments a counter when `owns === true`, triggers
+an immediate `refresh()` on the first claim, and stops the chain when the last
+owner leaves. The claim is held by the **row-augmentation module**, which is
+what renders the launcher, the row buttons and the countdown, so the data is
+owned by the thing that consumes it. It is deliberately not keyed on the record
+list (the records are what the poll produces — that would be circular) and it is
+released in that module's disposer, so unloading the plugin stops the poll. The
+same module loads the settings once per session, because `alwaysShowCloudButton`
+is read by the row patch and would otherwise stay unloaded until the settings
+page was opened.
 
 ## 7. Internal module interfaces (frozen — code against these)
 

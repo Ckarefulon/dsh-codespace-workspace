@@ -1,7 +1,7 @@
 # Build output / dependencies (none — this plugin has no build step)
 node_modules/
 
-# Local scratch: extracted DSH sources, test harnesses, API dumps
+# Local scratch: extracted DSH sources, throwaway probes, API dumps
 tmp/
 tmp-*/
 *.log

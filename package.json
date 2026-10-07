@@ -25,6 +25,10 @@
   "engines": {
     "node": ">=22.0.0"
   },
+  "scripts": {
+    "test": "node test/check.mjs",
+    "test:browser": "node test/serve.mjs"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -54,7 +58,6 @@
       "inject": [
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-workspace"
       ]
     }
