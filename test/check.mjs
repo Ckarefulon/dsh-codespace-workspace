@@ -365,6 +365,21 @@ const used = [...clientSource.matchAll(/\bt\('([a-zA-Z0-9_.]+)'/g)].map((m) => m
 const absentKeys = [...new Set(used)].filter((key) => !zhKeys.includes(key))
 check(absentKeys.length === 0, 'every t() key used by the client exists in the locale', absentKeys.join(', '))
 
+// The reverse direction: a key nothing reads is dead weight, and dead keys
+// accumulate quietly after a UI change (this caught one after the launcher
+// moved out of the sidebar footer). `nav` is exempt because the HOST reads it
+// for the settings nav entry, not the client.
+const HOST_SUPPLIED = new Set(['nav'])
+const unusedKeys = zhKeys.filter((key) => {
+  if (HOST_SUPPLIED.has(key)) return false
+  if (clientSource.includes(`'${key}'`)) return false
+  // Dynamic keys: t('prefix.' + value) — the literal prefix is what to look for.
+  const dot = key.lastIndexOf('.')
+  if (dot > 0 && clientSource.includes(`'${key.slice(0, dot + 1)}`)) return false
+  return true
+})
+check(unusedKeys.length === 0, 'the locale has no keys the client never reads', unusedKeys.join(', '))
+
 } finally {
   // Remove the junction WITHOUT recursing. `rmSync(..., {recursive:true})` on a
   // Windows directory junction follows it and deletes the TARGET's contents —
