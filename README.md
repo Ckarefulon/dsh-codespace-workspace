@@ -160,6 +160,7 @@ lib/
 locale/{en,zh}.json      文案
 test/
   check.mjs              Node 侧自检（不需要浏览器、token、gh）
+  shutdown.mjs           「退出即停」的可靠性自检
   serve.mjs              浏览器自检的静态服务器
   browser/               浏览器自检：index.html + harness.js + react-lite.js
 ```
@@ -188,7 +189,7 @@ test/
 
 ```bash
 # Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
-node test/check.mjs                # 77 项，全通过
+node test/check.mjs                # 81 项，全通过
 
 # 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
 node test/shutdown.mjs             # 31 项，全通过
