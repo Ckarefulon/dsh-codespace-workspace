@@ -232,11 +232,26 @@ eq('the launcher carries the accessible name', launcher.getAttribute('aria-label
 eq('the launcher has a tooltip', launcher.getAttribute('title'), '新建云端工作区')
 check(launcher.querySelector('svg') !== null, 'the launcher holds the cloud svg')
 
-// Metrics: it must match the host's iconButton, and not be clipped by max-width.
+// Metrics: it must match the host's HEADER icon control, which is
+// `WorkspaceBrowser`'s 28x28 `_iconButton` -- not `Rows`' 16x16 one. It also
+// must not be clipped by the row's `max-width:60px`.
 const launcherBox = launcher.getBoundingClientRect()
 const addBox = headerActions.lastElementChild.getBoundingClientRect()
-eq('the launcher is 16x16 like its peers', `${Math.round(launcherBox.width)}x${Math.round(launcherBox.height)}`, '16x16')
-eq('the host add control is 16x16 too', `${Math.round(addBox.width)}x${Math.round(addBox.height)}`, '16x16')
+eq('the launcher is 28x28 like its header peers', `${Math.round(launcherBox.width)}x${Math.round(launcherBox.height)}`, '28x28')
+eq('the host add control is 28x28 too', `${Math.round(addBox.width)}x${Math.round(addBox.height)}`, '28x28')
+eq('the launcher takes the host control radius',
+  getComputedStyle(launcher).borderRadius, getComputedStyle(headerActions.lastElementChild).borderRadius)
+eq('the launcher takes the host control colour',
+  getComputedStyle(launcher).color, getComputedStyle(headerActions.lastElementChild).color)
+// Hover is a background on the host control, never a colour change.
+check(getComputedStyle(launcher).backgroundColor === 'rgba(0, 0, 0, 0)',
+  'the launcher is transparent at rest, like its peers', getComputedStyle(launcher).backgroundColor)
+// The glyph must be drawn at the host's `Regular` weight (1), which is the
+// difference between matching the "+" beside it and looking heavier.
+const cloudSvg = launcher.querySelector('svg')
+eq('the cloud glyph uses the host Regular stroke width', cloudSvg.getAttribute('stroke-width'), '1')
+eq('the cloud path carries no stroke-width of its own',
+  cloudSvg.querySelector('path').getAttribute('stroke-width'), null)
 check(launcherBox.right <= addBox.left + 1, 'the launcher is laid out to the left of the add control',
   `launcher.right=${Math.round(launcherBox.right)} add.left=${Math.round(addBox.left)}`)
 check(launcherBox.left >= headerActions.getBoundingClientRect().left - 1,
@@ -273,8 +288,12 @@ await settle(30)
 const railBox = launcher.getBoundingClientRect()
 eq('rail mode: the launcher grows to 36x36 with its peers',
   `${Math.round(railBox.width)}x${Math.round(railBox.height)}`, '36x36')
+// The host's glyph follows the box: `IconProjectAddOutlineRegular, { size: wide ? 16 : 18 }`.
+eq('rail mode: the glyph grows to 18px with it',
+  getComputedStyle(launcher.querySelector('svg')).width, '18px')
 document.getElementById('sidebar').classList.remove('_9lTDKa_rail')
 await settle(30)
+eq('and the glyph returns to 16px', getComputedStyle(launcher.querySelector('svg')).width, '16px')
 
 /* ------------------------------------------------------------------ *
  * 5. The row patch.

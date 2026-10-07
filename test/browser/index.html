@@ -4,6 +4,22 @@
 <meta charset="utf-8">
 <title>dsh-codespace-workspace — DOM augmentation harness</title>
 <style>
+  /* The real host page always defines these design tokens. The fixture must too:
+     a rule that reads an undefined token resolves to nothing, so the plugin's
+     control would silently compute a different colour from its neighbour and the
+     "same as its peers" comparisons below would be measuring the wrong thing.
+     The values are placeholders -- only their presence is load-bearing. */
+  :root {
+    --dsw-radius-xs: 4px;
+    --dsw-radius-sm: 6px;
+    --dsw-radius-md: 8px;
+    --dsw-focus-ring-width: 2px;
+    --dsw-focus-ring-color: #4c8dff;
+    --dsw-alias-label-primary: #e8e8e8;
+    --dsw-alias-label-secondary: #8b8b8b;
+    --dsw-alias-label-tertiary: #a0a0a0;
+    --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, .08);
+  }
   /* The host's real metrics, copied from dsh-client-ui-workspace so the
      reveal/hide mechanics behave exactly as in the app. The hash prefix is
      per-build; these are the shipped values. */
@@ -30,12 +46,17 @@
   ._9lTDKa_headerActions { opacity: 1; visibility: visible; max-width: 60px; flex: none;
     align-items: center; gap: 4px; display: flex; overflow: hidden; }
   ._9lTDKa_headerActionsHidden { opacity: 0; visibility: hidden; pointer-events: none; max-width: 0; }
-  ._9lTDKa_iconButton { border-radius: 4px; cursor: pointer; width: 16px; height: 16px;
-    color: #888; background: 0 0; border: none; flex: none; justify-content: center;
-    align-items: center; padding: 0; display: inline-flex; }
-  ._9lTDKa_iconButton:hover { color: #fff; }
+  /* `WorkspaceBrowser`'s `_iconButton` — the HEADER control. This is the 28x28
+     one. The 16x16 control is `Rows`' `hIlkoa_iconButton`, a different class in
+     a different module; an earlier revision of this fixture copied the row
+     metrics here, which let a 16x16 launcher pass as "like its peers" while the
+     real header buttons are 28x28. */
+  ._9lTDKa_iconButton { border-radius: var(--dsw-radius-sm, 6px); cursor: pointer; width: 28px; height: 28px;
+    color: var(--dsw-alias-label-secondary, #8b8b8b); background: 0 0; border: none; flex: none;
+    justify-content: center; align-items: center; padding: 0; display: inline-flex; }
+  ._9lTDKa_iconButton:hover { background: var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,.08)); }
   ._9lTDKa_rail ._9lTDKa_headerActions { max-width: none; }
-  ._9lTDKa_rail ._9lTDKa_iconButton { border-radius: 8px; width: 36px; height: 36px; color: #fff; }
+  ._9lTDKa_rail ._9lTDKa_iconButton { border-radius: var(--dsw-radius-md, 8px); width: 36px; height: 36px; color: var(--dsw-alias-label-primary, #fff); }
   body { font: 13px system-ui; background: #1b1d1f; color: #eee; margin: 0; padding: 12px; }
   #report { white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; margin-top: 12px; }
   .ok { color: #5fd75f; } .fail { color: #ff6b6b; } .info { color: #9bb8ff; }

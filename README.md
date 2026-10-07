@@ -186,7 +186,7 @@ test/
 
 ## 验证
 
-四套自检，都不需要 token、`gh` 或真实 Codespace：
+四套离线自检（不需要 token、`gh` 或真实 Codespace），加一套需要令牌的联网自检：
 
 ```bash
 # Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
@@ -201,8 +201,17 @@ node test/e2e.mjs                  # 全通过（找不到已安装的 Harness �
 
 # 浏览器侧：在真实 DOM 里跑真实 bundle，对着宿主 markup/CSS 的忠实副本
 node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
-                                   # 107 项，全通过
+                                   # 114 项，全通过
+
+# 联网：用 gh 的令牌打真实 GitHub API（无令牌时自动 SKIP）
+node test/live.mjs
 ```
+
+`test/live.mjs` 是唯一会碰网络的一套，它存在的理由很具体：离线套件看不见本机那个
+**TLS 拦截**故障——中间人根证书只在 Windows 系统信任库里，Node 的 `fetch` 只信自带
+CA 包，于是所有 GitHub API 调用都变成 `TypeError: fetch failed`，而 `gh` 走 Go 读系统
+库完全正常。这套测试先量出「直连能不能用」，再断言控制面**两条路都通**，这样回退路径
+真的被走到时才算数。
 
 `test/e2e.mjs` 是这套里最有价值的一个：它不驱动桩，而是从已安装的 Harness 里
 `import` **真实的** `dsh-host-webserver` 与 `dsh-client-connection`，注册真实的
@@ -298,6 +307,39 @@ POST /api/no-such-plugin-xyz            （无 cookie，Origin 匹配）-> 401 u
   是公开的触发点（已实测：服务晚到时它会触发，永不出现时保持沉默且不抛），
   于是晚到的 `connection` 会把兜底路由换掉，而不是让进程一直停在较弱的载体上。
 
+**三、`仓库读取失败：cannot reach the GitHub API (TypeError)`**
+
+`gh` 装好、状态卡全绿之后，仓库列表依然读不出来。原因是**本机有 TLS 拦截**：中间人
+根证书只装在 Windows 系统信任库里，而 Node 的 `fetch` 只信**自带**的 CA 包，于是每次
+调用都失败——真正的成因藏在 `error.cause.code = UNABLE_TO_VERIFY_LEAF_SIGNATURE`，
+而旧代码只把 `error.name` 写进消息，于是用户看到的是一个毫无信息量的 `TypeError`。
+`gh` 用 Go 读系统库，同一个请求完全正常，这才造成「令牌来自 gh auth token 却调不通
+API」这种一半好的假象。
+
+修法是给控制面加一条**进程内**的回退：`tls.getCACertificates('system')` 取到系统信任库
+（本机 225 个证书），失败的那一发改走 `node:https` 请求并带上 `ca`，结果包成真的
+`Response`，所以下游的 `status`/`headers.get`/`text()` 全都不用改。**没有**用
+`tls.setDefaultCACertificates()`——那会让本插件偷偷放宽整个 host 进程的 TLS 信任，影响到
+别的插件；改动留在自己的传输层里。错误消息也改成报 `cause` 的 code，不再是 `TypeError`。
+
+另有 `NODE_OPTIONS=--use-system-ca` 可用（一次修好所有 Node 代码），但它要改环境变量并
+重启 DSH，所以只作为备选写在这里。
+
+**四、启动图标的样式和旁边的按钮不一样**
+
+需求里那句「样式要和其他的等价」原来没做到：我的按钮做成了 **16×16**、`radius-xs`、
+hover 只变色，而标题栏真正用的 `_9lTDKa_iconButton` 是 **28×28**、`radius-sm`、
+`--dsw-alias-label-secondary`，**hover 出现背景**而不是变色。图标本身也偏重：我写了
+`stroke-width="1.3"`（那是宿主 `Medium` 档）**并且写在 path 上**，而旁边的加号是
+`IconProjectAddOutlineRegular`，即 **1**，且按 primitives 的规范 `stroke-width` 应该放在
+`<svg>` 上。
+
+我一开始把 16×16 当成对的，是因为把 `Rows` 模块的 `hIlkoa_iconButton`（工作区行的按钮，
+确实是 16×16）错当成了标题栏的类——**浏览器 harness 的夹具也照抄了这个错值**，于是
+「launcher 和其它按钮一样大」这条断言一直是绿的。夹具已按真实 CSS 改正，并补上几何、
+圆角、颜色、hover 背景、描边宽度、rail 下字形 18px 的断言（浏览器侧从 107 项涨到 114 项）。
+云朵路径同时抽成一个常量，React 与 DOM 两条渲染路径共用，避免再次漂移。
+
 ## 已知限制
 
 - **工作区分组标题栏的图标行、以及工作区行，都没有官方插槽**。DSH 把「添加工作区」
@@ -311,18 +353,22 @@ POST /api/no-such-plugin-xyz            （无 cookie，Origin 匹配）-> 401 u
   但它把控件放在侧边栏底部，不符合「与原有三个图标同地位、紧挨添加工作区左侧」的要求。
   标题栏的 `_sectionHeader` / `_headerActions` 两个类名后缀经核对为
   `dsh-client-ui-workspace` 独有，不会误匹配。
-- 标题栏图标行是 `justify-content:flex-end` + `max-width:60px`（正好放下三个 16px
-  图标）。加进第四个控件需要放宽容器宽度，但放宽规则带了
-  `:not([class*="_headerActionsHidden"])`，以免盖掉宿主自己在展开搜索框时的收起行为。
-  另外「添加工作区」按钮只在目录流插槽被占用时才渲染，所以插入位置是「最后一个子元素
-  之前」而不是固定下标。
+- 标题栏图标行是 `justify-content:flex-end` + `max-width:60px`，而标题栏的控件是
+  **28×28**（`_9lTDKa_iconButton`），所以 60px 正好放**两个**（28+4+28）。加进第三个
+  控件需要放宽容器宽度，放宽规则带了 `:not([class*="_headerActionsHidden"])`，以免盖掉
+  宿主自己在展开搜索框时的收起行为。**注意别把 `Rows` 模块的 `hIlkoa_iconButton`
+  （16×16，工作区行的按钮）当成标题栏的类**——两者同后缀不同模块，混淆过一次，见上文
+  「四」。另外「添加工作区」按钮只在目录流插槽被占用时才渲染，所以插入位置是「最后一个
+  子元素之前」而不是固定下标。窄栏（rail）下宿主把盒子放大到 36px、字形放大到 18px。
 - 远程工具以文本方式传输文件（base64），大文件不适合；大仓库建议让 Agent 在
   Codespace 内直接操作。
 - `gh` 缺失时依赖用户自行配置 SSH 别名。设置项名为「SSH 密钥」，但**私钥路径无法
   指定主机**，所以该值被当作 `~/.ssh/config` 的主机别名使用；填成路径会得到一条
   说明如何修正的错误，而不是把路径当主机名交给 `ssh`。
-- 未在本机实测的部分：GitHub REST 与 `gh` 的真实响应（本机没装 `gh`、无 token），
-  以及真实 SSH 数据面（没有已配置的 Codespace 目标）。命令拼装本身已用真实 bash
+- 未在本机实测的部分：**真实 SSH 数据面**（没有已配置的 Codespace 目标），以及
+  Codespace 的创建/启停/删除这些会改云端状态的调用。控制面本身已联网实测：
+  `test/live.mjs` 用 `gh` 的令牌打真实 GitHub API，`getViewer` / `listRepos` /
+  `listCodespaces` 都通（本机 18 个仓库、0 个 Codespace）。命令拼装也已用真实 bash
   验证：20 组逐字节往返 + 5 组注入载荷，均保持为单个 shell 词且无副作用。
 
   **「退出即停」不在此列**：它的逻辑已按上面的 `test/shutdown.mjs` 实测（并发、

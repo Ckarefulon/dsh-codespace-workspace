@@ -178,6 +178,38 @@ Two more details that matter:
   `endpointFromPath('/api', path)` must not be `undefined`, i.e. the path must
   be `/api/<segments>` with every segment matching `/^[A-Za-z0-9_$.-]+$/`.
 
+### Outbound HTTPS: Node trusts only its bundled CA list
+
+Measured on the development machine and worth knowing before debugging any
+"cannot reach the API" report: this box has a **TLS-intercepting proxy** whose
+root lives in the Windows trust store and nowhere else. `fetch` (undici)
+validates against Node's *bundled* CA list, so **every** request to the GitHub
+API fails, while `gh` (Go, which reads the OS store) succeeds on the very same
+request — the confusing "authenticated via `gh auth token`, yet the API is
+unreachable" state.
+
+The real cause is **never in `error.name`**: a `fetch` transport failure is
+`TypeError: fetch failed`, and the actionable code is in `error.cause.code`
+(`UNABLE_TO_VERIFY_LEAF_SIGNATURE`). Reporting `error.name` alone produces a
+useless message; report the cause code.
+
+`lib/host/github.js` handles it **in process**, without touching global TLS
+state:
+
+```js
+import { getCACertificates } from 'node:tls'   // Node 24+
+// on a trust failure only, retry once through node:https with
+// ca = getCACertificates('system')  (225 certs on this machine)
+```
+
+`tls.setDefaultCACertificates(...)` also works but is **rejected**: it would
+silently widen TLS trust for the entire host process, affecting every other
+plugin. `NODE_OPTIONS=--use-system-ca` is the environment-level equivalent and
+fixes all Node code at once, but needs an env change plus a DSH restart, so it is
+only documented as an alternative. The `test/live.mjs` suite exists to catch this
+class of failure — it first measures whether the direct path works and then
+asserts the control plane succeeds either way.
+
 ### Client module
 
 * File is a lazy-CJS bundle loaded through the global loader:
@@ -255,13 +287,32 @@ where the requirement places it. It is therefore a DOM augmentation instead.
   (a real `<button>`) whenever `directoryFlowAvailable` is true. It is absent
   when the directory-flow slot is unoccupied, so the insert position must be
   "before the last child" with a fallback, never a fixed index.
-* `headerActionsHidden` (`opacity:0;visibility:hidden;max-width:0`) is added
-  while the search box is expanded. `max-width:60px` fits exactly three 16px
-  icons at 4px gaps (56px), so our third control needs the container widened —
-  but the widening rule **must not** out-specify the host's own collapse, hence
-  `:not([class*="_headerActionsHidden"])`.
-* Rail mode enlarges the host's controls to 36px via `.<hash>_rail .<hash>_iconButton`;
-  our button needs a matching rule or it looks undersized next to its peers.
+* **`headerActions`' buttons are 28x28, not 16x16.** They are
+  `WorkspaceBrowser`'s `.<hash>_iconButton`: `width/height:28px`,
+  `border-radius:var(--dsw-radius-sm)`, `color:var(--dsw-alias-label-secondary)`,
+  transparent background, and a hover that shows a **background**
+  (`var(--dsw-alias-interactive-bg-hover)`) rather than changing the colour.
+  `max-width:60px` therefore fits exactly **two** (28+4+28), so our control needs
+  the container widened — but the widening rule **must not** out-specify the
+  host's own collapse, hence `:not([class*="_headerActionsHidden"])`.
+  Do **not** confuse this with `Rows`' `.<hash>_iconButton`, a different module's
+  class that *is* 16x16 (the workspace-row buttons). Conflating the two is how
+  this plugin shipped a 16x16 header control; the browser fixture had copied the
+  same wrong value, so its "same size as its peers" assertion stayed green.
+* `headerActionsHidden` (`opacity:0;visibility:hidden;max-width:0;pointer-events:none`)
+  is added while the search box is expanded, which is why the widening rule
+  carries the `:not(...)` guard. Our control is a child of the container, so it
+  disappears with its peers for free while that class is on.
+* Rail mode enlarges the host's box to `36px` / `var(--dsw-radius-md)` /
+  `var(--dsw-alias-label-primary)` **and its glyph to 18px** (`IconProjectAddOutlineRegular,
+  { size: wide ? 16 : 18 }`), so our button and glyph both need matching rules.
+* **Glyph spec** (only matters when drawing our own SVG; there is no cloud
+  artwork in the primitives bundle): `<svg width height viewBox="0 0 16 16"
+  fill="none" xmlns aria-hidden="true" stroke-width={1}>`, `stroke="currentColor"`
+  on each stroked path, and **`stroke-width` on the `<svg>`, never on the path**.
+  `Regular` = 1, `Medium` = `ICON_MEDIUM_STROKE` = 1.3; the header uses `Regular`.
+  The plugin's cloud path lives in one shared constant so the React and DOM
+  renderers cannot drift, and the browser suite asserts the weight.
 * `_sectionHeader` / `_headerActions` are **unique to this package** (checked
   across every extracted UI bundle), so suffix matching cannot collide.
 

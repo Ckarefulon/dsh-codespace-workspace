@@ -30,6 +30,7 @@
     "test:node": "node test/check.mjs",
     "test:shutdown": "node test/shutdown.mjs",
     "test:e2e": "node test/e2e.mjs",
+    "test:live": "node test/live.mjs",
     "test:browser": "node test/serve.mjs"
   },
   "keywords": [
