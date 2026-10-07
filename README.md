@@ -161,6 +161,7 @@ locale/{en,zh}.json      文案
 test/
   check.mjs              Node 侧自检（不需要浏览器、token、gh）
   shutdown.mjs           「退出即停」的可靠性自检
+  e2e.mjs                载体端到端：真实 webserver + 真实 connection + 真实签名 cookie
   serve.mjs              浏览器自检的静态服务器
   browser/               浏览器自检：index.html + harness.js + react-lite.js
 ```
