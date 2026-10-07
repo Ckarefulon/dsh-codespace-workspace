@@ -326,6 +326,32 @@ hardcoded settings nav icon. Rules:
     request did not complete. Requirement 4's startup prompt is the safety net
     for this path.
 
+  **Implementation status — verified by `test/shutdown.mjs` (31 checks).** Every
+  bullet above is now asserted against the real `CodespaceManager` with only
+  `fetch` stubbed: both managed Codespaces are asked to stop; the two stops
+  overlap (two 300 ms stops land inside 550 ms, so they are not serial); a 500,
+  a transport failure, a hang and a missing token all leave the disposer
+  **resolved**; the hang is cut off after the 3.5 s per-request budget and the
+  whole call still lands inside 5 s; a second `stopAll` issues no further
+  requests; unconfirmed names land in `pending-stop.json`.
+
+  Two traps worth keeping in mind if this test is ever rewritten:
+
+  * The "API hangs" case **must** use a real socket (a local `http` server that
+    accepts and never replies), not a stubbed `fetch`. Node's
+    `AbortSignal.timeout()` timer is **unref'd**: a stub returning a
+    never-settling promise holds no ref'd handle, so the process drains and
+    exits before the abort can fire. That produces a *false* result in either
+    direction depending on what else is pending. Verified separately that
+    against a real silent socket `api()` throws `E_TIMEOUT` at 1215 ms for a
+    1200 ms budget.
+  * The still-unverified layer is only whether the *live* GitHub API accepts the
+    stop call — that depends on the token and the account, not on this logic.
+    Likewise, "the harness awaits the root effect disposer" is established by
+    reading `runProfile` / cordis `_unload`, not by watching a real exit; there
+    is no reproducible Codespace target on this machine for an end-to-end
+    observation.
+
 ## 3. Codespaces environment facts
 
 * `gh` (GitHub CLI) is **NOT installed** on this machine. `git` and `ssh` are.

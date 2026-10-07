@@ -184,16 +184,38 @@ test/
 
 ## 验证
 
-两套自检，都不需要 token、`gh` 或真实 Codespace：
+三套自检，都不需要 token、`gh` 或真实 Codespace：
 
 ```bash
 # Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
-node test/check.mjs                # 75 项，全通过
+node test/check.mjs                # 77 项，全通过
+
+# 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
+node test/shutdown.mjs             # 31 项，全通过
 
 # 浏览器侧：在真实 DOM 里跑真实 bundle，对着宿主 markup/CSS 的忠实副本
 node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
                                    # 114 项，全通过
 ```
+
+`test/shutdown.mjs` 覆盖的是「退出即停」这条最重要的可靠性要求——一个没停掉的
+Codespace 会按小时计费，而用户看不见也补不回来。它断言的是真正要紧的性质：
+
+- 每个受管 Codespace 都被要求停止，而且是**并发**发出（两个 300ms 的停止必须在
+  550ms 内跑完，串行会超）。
+- 请求失败、连接被拒、**API 收下连接但永不回复**这三种情况下，disposer 都**必须
+  resolve**。reject 的 disposer 会让 `runProfile` 抛 `AggregateError`——那就从
+  「有一个 Codespace 没停掉」变成「DSH 退不出去」，是更糟的失败模式。
+- 最坏情况仍在 5 秒进程预算之内，且不早于单请求的 3.5 秒预算。
+- 幂等：teardown 跑第二次不再发任何请求。
+- 没停成功的名字会写进 `pending-stop.json`，下次启动的残留提示还能兜住。
+- 没有 token 时不去发请求，而是把名字全部记成 pending。
+
+其中「API 永不回复」这一例用的是**真实 socket**（本地起一个只收不回的
+`http` server，把真实 `init`——含 signal——转给真实 `fetch`），不是桩。原因值得记：
+Node 里 `AbortSignal.timeout()` 的定时器是 **unref'd** 的，一个「返回永不 settle 的
+promise」的桩不持有任何 ref'd handle，进程会直接退出而不是触发超时——用桩测这一条
+会得到假结果。已单独核实：真实 socket 下 `api()` 在 1215ms 抛 `E_TIMEOUT`。
 
 浏览器侧覆盖的是 Node 里没法验证的部分：真实属性反射、`:hover` 驱动的 CSS、
 `MutationObserver` 合并、portal 到 `document.body` 的菜单。它实际抓到过两个 bug：
@@ -236,6 +258,14 @@ node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
 - 未在本机实测的部分：GitHub REST 与 `gh` 的真实响应（本机没装 `gh`、无 token），
   以及真实 SSH 数据面（没有已配置的 Codespace 目标）。命令拼装本身已用真实 bash
   验证：20 组逐字节往返 + 5 组注入载荷，均保持为单个 shell 词且无副作用。
+
+  **「退出即停」不在此列**：它的逻辑已按上面的 `test/shutdown.mjs` 实测（并发、
+  不 reject、5 秒预算内、幂等、pending 落盘）。仍然未经实测的只有「真实 GitHub
+  是否接受这次 stop 调用」这一层——那取决于 token 与账号，不取决于本插件的逻辑。
+  另外「宿主在退出时确实会 await 根 effect 的 disposer」这一条是**读 DSH 源码**
+  核实的（`runProfile` 的 `dispose` → `fiber.dispose()` → cordis `_unload` 并发
+  await 每个 disposer），不是在本机跑一次退出观察到的；本机没有可复现的 Codespace
+  目标，无法做端到端退出观察。
 
 ## 文档
 

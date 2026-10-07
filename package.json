@@ -26,7 +26,9 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "test": "node test/check.mjs",
+    "test": "node test/check.mjs && node test/shutdown.mjs",
+    "test:node": "node test/check.mjs",
+    "test:shutdown": "node test/shutdown.mjs",
     "test:browser": "node test/serve.mjs"
   },
   "keywords": [
