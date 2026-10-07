@@ -313,6 +313,34 @@ where the requirement places it. It is therefore a DOM augmentation instead.
   `Regular` = 1, `Medium` = `ICON_MEDIUM_STROKE` = 1.3; the header uses `Regular`.
   The plugin's cloud path lives in one shared constant so the React and DOM
   renderers cannot drift, and the browser suite asserts the weight.
+* **The launcher glyph is a cloud PLUS the add mark**, echoing the host's own
+  `IconProjectAddOutlineRegular` (folder + plus) on the button beside it. The plus
+  strokes are copied verbatim from that artwork; the cloud is scaled into the
+  lower-left by a `<g transform>` carrying `vector-effect="non-scaling-stroke"`, so
+  the scale does not thin the stroke. The two pieces must not touch — check with
+  `getBoundingClientRect()` relative to the `<svg>`, because **`getBBox()` ignores
+  an element's own transform** and reports the unscaled box.
+* **The launcher must stay LEFT of 添加工作区**, which is subtler than it looks:
+  * `headerActions` may contain a **tooltip bubble**: the host's `Tooltip` is not
+    portalled here (the workspace header passes no `portal` prop), so React renders
+    an open bubble as a **sibling `<span role="tooltip">` in this same container**.
+    Anything anchored on `lastElementChild` therefore moves the launcher in front
+    of the bubble — i.e. to the RIGHT of the "+" — which is why the symptom looked
+    intermittent (a tooltip had to be open).
+  * React does not know our node exists, so a re-render can place one of its
+    controls after it.
+  * Both are handled by **remembering the anchor element** (`headerAnchor`) and
+    keeping the launcher immediately before *that*, instead of re-deriving "the
+    last control" on every pass. Re-deriving cannot self-repair, because in the
+    broken state the launcher's own neighbour is exactly what such a rule finds.
+    Select the anchor by tag name (`BUTTON`), never by child order.
+* **Hover text uses a hand-built DSH-shaped bubble, not `title`.** The host's
+  `Tooltip` is a React component that cannot be reused here, so its *rendered
+  result* is reproduced: `position:fixed`, the real tooltip tokens, `role="tooltip"`,
+  a 500ms hover delay (the host's `delayMs: 500`), appended to `document.body`. A
+  native `title` would draw an OS bubble that looks nothing like the one on the
+  neighbouring host controls — and, had it been appended into `headerActions`,
+  would itself have caused the displacement above.
 * `_sectionHeader` / `_headerActions` are **unique to this package** (checked
   across every extracted UI bundle), so suffix matching cannot collide.
 

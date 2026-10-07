@@ -201,7 +201,7 @@ node test/e2e.mjs                  # 全通过（找不到已安装的 Harness �
 
 # 浏览器侧：在真实 DOM 里跑真实 bundle，对着宿主 markup/CSS 的忠实副本
 node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
-                                   # 114 项，全通过
+                                   # 125 项，全通过
 
 # 联网：用 gh 的令牌打真实 GitHub API（无令牌时自动 SKIP）
 node test/live.mjs
@@ -339,6 +339,47 @@ hover 只变色，而标题栏真正用的 `_9lTDKa_iconButton` 是 **28×28**�
 「launcher 和其它按钮一样大」这条断言一直是绿的。夹具已按真实 CSS 改正，并补上几何、
 圆角、颜色、hover 背景、描边宽度、rail 下字形 18px 的断言（浏览器侧从 107 项涨到 114 项）。
 云朵路径同时抽成一个常量，React 与 DOM 两条渲染路径共用，避免再次漂移。
+
+**五、图标会「有时候」跑到「新建工作区」按钮的右边**
+
+听起来像时序问题，其实是**确定性**的，只是触发条件不明显：**只有宿主自己的提示框
+正开着时才会发生**。原因是 DSH 的 `Tooltip` 在缺省配置下**不是 portal**（工作区标题栏
+没传 `portal`），所以气泡是以**兄弟节点**的形式渲染在**同一个 `headerActions` 容器**里
+的。我那段「把按钮插到最后一个子元素之前」的代码于是把按钮插到了气泡前面 —— 也就是
+「添加工作区」的右边。
+
+更糟的是它**不能自愈**：一旦插错，按钮的 `nextElementSibling` 正是那段代码要去找的
+东西，于是每次重扫都「看起来已经就位」。现在改成**记住锚点元素**、永远贴在它前面，
+而不是每轮重新猜「最后一个控件」；选锚点只看标签名（`BUTTON`），不看子节点顺序。
+浏览器套件补了两条会真的触发它的回归测试：宿主重渲染追加控件、以及一个开着的提示框
+气泡。另外我自己那个提示框**挂到 `document.body`**，从根上不再进这个容器。
+
+**六、`typeof` 一个未声明的名字让提示框静默失效**
+
+改提示框时踩了个安静的坑：`attachTooltip` 是模块作用域的函数，而 `doc` 是
+`installRowAugmentation` 的**局部变量**。我写了 `typeof doc === 'undefined'` 当守卫 ——
+但 `typeof` 对**未声明的标识符**返回 `'undefined'` **而不抛错**，于是这个函数每次都直接
+返回空操作：**没有报错、console 干净、看起来一切正常，只是提示框永远不出现**。
+
+现在改成在函数内部解析 `document`（那是真实全局）。这条也写进了记忆：客户端 bundle 里
+绝不要用 `typeof someUndeclaredName` 当守卫。
+
+**七、图标补上了右上角的加号**
+
+「新建云端工作区」的图标原本是一个单独的云朵，而它旁边宿主自己的按钮是
+`IconProjectAddOutlineRegular`（文件夹 + 加号）。现在这个图标是**云朵 + 加号**：加号
+**逐字抄**宿主那两条 path，云朵用 `<g transform>` 缩到左下角，并带
+`vector-effect="non-scaling-stroke"` 以免缩放把 1px 描边抽细。两块**不能相碰** ——
+校验要用 `getBoundingClientRect()` 相对 `<svg>` 量，因为 **`getBBox()` 不反映元素自身
+的 transform**（它给的是未缩放的框，会得出错误结论）。
+
+**八、hover 提示框换成 DSH 那种**
+
+原来用的是原生 `title`，画出来是操作系统的气泡，和旁边宿主控件的完全不是一回事。现在
+照抄宿主 Tooltip 的**渲染结果**：`position:fixed`、真实的 tooltip 设计令牌、
+`role="tooltip"`、500ms 悬停延迟（宿主 `delayMs: 500`），并挂在 `document.body` 上。
+CSS 全部只引用 `--dsw-alias-tooltip-bg` / `--dsw-static-neutral-bluish-00` 这些主题
+变量，不硬编码任何颜色值。
 
 ## 已知限制
 

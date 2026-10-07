@@ -209,6 +209,31 @@ await settle(160)
  * 4. The section-header launcher.
  * ------------------------------------------------------------------ */
 
+/**
+ * Hover an element and return the text of the DSH-styled bubble it opens.
+ *
+ * The bubble is built lazily on `mouseenter` after a 500ms delay — the same
+ * delay the host's own header controls use — so this waits for the node to
+ * appear instead of sleeping a fixed amount. The plugin deliberately no longer
+ * sets `title`, so asserting on that attribute would test nothing at all.
+ */
+async function tooltipFor(element) {
+  const before = document.querySelectorAll('[data-dsh-codespace-tip]').length
+  element.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false }))
+  await settle(700)
+  const bubbles = document.querySelectorAll('[data-dsh-codespace-tip]')
+  if (bubbles.length === 0) {
+    check(false, 'a tooltip bubble to appear', `bubbles before=${String(before)}, after=0; element=${element.getAttribute('aria-label')}`)
+    element.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }))
+    return null
+  }
+  const text = bubbles[0].textContent
+  element.dispatchEvent(new MouseEvent('mouseleave', { bubbles: false }))
+  await until(() => document.querySelector('[data-dsh-codespace-tip]') === null,
+    'the tooltip bubble to be removed')
+  return text
+}
+
 section('section-header launcher')
 
 const header = document.querySelector('[class*="_sectionHeader"]')
@@ -229,8 +254,30 @@ eq('  ↳ order', [...headerActions.children].map((c) => c.getAttribute('aria-la
 check(headerActions.getAttribute('data-dsh-codespace-header') !== null,
   'the icon row is marked so the CSS can widen it')
 eq('the launcher carries the accessible name', launcher.getAttribute('aria-label'), '新建云端工作区')
-eq('the launcher has a tooltip', launcher.getAttribute('title'), '新建云端工作区')
+eq('the launcher does NOT use the OS bubble', launcher.getAttribute('title'), null)
+eq('the launcher has a DSH tooltip', await tooltipFor(launcher), '新建云端工作区')
 check(launcher.querySelector('svg') !== null, 'the launcher holds the cloud svg')
+
+// The glyph must be the cloud PLUS the add mark, like the host's own "add"
+// control. The plus is the host's own `IconProjectAddOutlineRegular` strokes.
+{
+  const svg = launcher.querySelector('svg')
+  const parts = svg.querySelectorAll('g[transform]')
+  eq('the launcher glyph composes a cloud and a plus', parts.length, 2)
+  eq('  -> drawn with three paths (1 cloud + 2 plus strokes)', svg.querySelectorAll('path').length, 3)
+  // Rendered geometry, because getBBox() ignores the element's own transform.
+  const sr = svg.getBoundingClientRect()
+  const unit = sr.width / 16
+  const rect = (el) => el.getBoundingClientRect()
+  const cloud = rect(parts[0])
+  const plusBottom = Math.max(...[...parts[1].querySelectorAll('path')].map((p) => rect(p).bottom))
+  check(plusBottom <= cloud.top + 0.5,
+    '  -> the cloud does not collide with the plus',
+    `gap ${Math.round((cloud.top - plusBottom) / unit * 100) / 100} units`)
+  check(cloud.left - sr.left >= -0.5 && cloud.right - sr.left <= sr.width + 0.5,
+    '  -> and the pair stays inside the viewBox',
+    `cloud x ${Math.round((cloud.left - sr.left) / unit * 100) / 100}..${Math.round((cloud.right - sr.left) / unit * 100) / 100}`)
+}
 
 // Metrics: it must match the host's HEADER icon control, which is
 // `WorkspaceBrowser`'s 28x28 `_iconButton` -- not `Rows`' 16x16 one. It also
@@ -260,6 +307,60 @@ check(headerActions.scrollWidth <= headerActions.clientWidth + 1,
   'nothing in the icon row overflows (the container was widened past 60px)',
   `scrollWidth=${headerActions.scrollWidth} clientWidth=${headerActions.clientWidth}`)
 eq('the host max-width was overridden', getComputedStyle(headerActions).maxWidth, 'none')
+
+/*
+ * The two ways the launcher historically ended up on the RIGHT of "添加工作区".
+ * Both are reproduced here, because each one defeated the other's fix.
+ */
+
+// (a) A React re-render that mounts one of ITS controls after ours. React does
+//     not know our node exists, so it appends and our button is left rightmost.
+{
+  const addControl = headerActions.lastElementChild
+  const moved = document.createElement('button')
+  moved.type = 'button'
+  moved.className = addControl.className
+  moved.setAttribute('aria-label', '视图选项')
+  // React's append: put the host control at the END, after our launcher.
+  headerActions.appendChild(moved)
+  await settle(40)
+  eq('after a host re-render appends a control, the launcher is still LEFT of 添加工作区',
+    launcher.nextElementSibling?.getAttribute('aria-label'), '添加工作区')
+  check(launcher.getBoundingClientRect().right <= addControl.getBoundingClientRect().left + 1,
+    '  -> and still to the left of it in layout')
+  moved.remove()
+  await settle(40)
+}
+
+// (b) An open host Tooltip. The workspace header passes no `portal` prop, so
+//     React renders the bubble as a SIBLING `<span role="tooltip">` inside this
+//     same container -- which is why the bug looked intermittent: it needed a
+//     tooltip to be open. `lastElementChild` became the bubble.
+{
+  const addControl = headerActions.lastElementChild
+  const bubble = document.createElement('span')
+  bubble.setAttribute('role', 'tooltip')
+  bubble.textContent = '添加工作区'
+  headerActions.appendChild(bubble)
+  await settle(40)
+  eq('with a host tooltip bubble open, the launcher is still LEFT of 添加工作区',
+    launcher.nextElementSibling?.getAttribute('aria-label'), '添加工作区')
+  check(launcher.getBoundingClientRect().right <= addControl.getBoundingClientRect().left + 1,
+    '  -> and not pushed past it in layout')
+  bubble.remove()
+  await settle(40)
+}
+
+// Our own bubble must never be placed inside the icon row either, or it would
+// become exactly the sibling that used to displace the button.
+{
+  await tooltipFor(launcher)
+  await until(() => document.querySelector('[data-dsh-codespace-tip]') === null, 'our bubble to close')
+  eq('our bubble is never left inside the icon row',
+    headerActions.querySelectorAll('[data-dsh-codespace-tip]').length, 0)
+  eq('  -> and the launcher is still in position afterwards',
+    launcher.nextElementSibling?.getAttribute('aria-label'), '添加工作区')
+}
 
 // The host's own collapse while the search box is expanded must still win.
 headerActions.classList.add('_9lTDKa_headerActionsHidden')
@@ -342,9 +443,11 @@ const untilGlyph = (kind) => until(
   () => button.getAttribute('data-dsh-codespace-glyph-kind') === kind,
   `the button to show the "${kind}" glyph`)
 
+const tooltipTextOf = tooltipFor
+
 // stopped
 eq('stopped → ▶️', glyph(), '▶️')
-eq('stopped → tooltip', button.getAttribute('title'), '启动 Codespace')
+eq('stopped → tooltip', await tooltipTextOf(button), '启动 Codespace')
 eq('stopped → aria-label', button.getAttribute('aria-label'), '启动 Codespace')
 eq('stopped → not disabled', button.disabled, false)
 
@@ -352,13 +455,13 @@ eq('stopped → not disabled', button.disabled, false)
 record = { ...record, codespace: { ...record.codespace, state: 'Available' } }
 await untilGlyph('stop')
 eq('running → ⏸️', glyph(), '⏸️')
-eq('running → tooltip', button.getAttribute('title'), '暂停 Codespace')
+eq('running → tooltip', await tooltipTextOf(button), '暂停 Codespace')
 
 // counting down
 record = { ...record, autoPauseRemainingMs: 25 * 60 * 1000 }
 await untilGlyph('countdown')
 eq('counting down → 🕐', glyph(), '🕐')
-eq('counting down → tooltip carries the minutes', button.getAttribute('title'), '还剩 25 分钟自动暂停')
+eq('counting down → tooltip carries the minutes', await tooltipTextOf(button), '还剩 25 分钟自动暂停')
 
 // starting: spinner, disabled
 record = { ...record, autoPauseRemainingMs: 0, codespace: { ...record.codespace, state: 'Provisioning' } }
@@ -366,13 +469,13 @@ await untilGlyph('pending')
 check(button.querySelector('[data-dsh-codespace-glyph]') === null, 'starting → no glyph')
 check(button.querySelector('.dcw-spin') !== null, 'starting → spinner shown')
 eq('starting → disabled', button.disabled, true)
-eq('starting → tooltip', button.getAttribute('title'), '正在切换状态…')
+eq('starting → tooltip', await tooltipTextOf(button), '正在切换状态…')
 
 // error
 record = { ...record, codespace: { ...record.codespace, state: 'Failed' } }
 await untilGlyph('error')
 eq('error → ⚠️', glyph(), '⚠️')
-eq('error → tooltip names the state', button.getAttribute('title'), '状态异常：Failed')
+eq('error → tooltip names the state', await tooltipTextOf(button), '状态异常：Failed')
 
 /* ---- the click protocol ---- */
 
