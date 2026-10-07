@@ -313,6 +313,19 @@ const requires = [...clientSource.matchAll(/require\((['"])([^'"]+)\1\)/g)].map(
 eq('react is the only module the bundle requires',
   JSON.stringify([...new Set(requires)]), JSON.stringify(['react']))
 
+// The runner's dynamic context proxy gates DIRECT service access (`ctx.locale`)
+// on the plugin's `inject` declaration, but `ctx.get(name)` is ungated
+// (`readService(name, false)` in `dsh-cordis-client-runner/lib/client.js`). Our
+// client reads `locale` optionally through `ctx.get`, so it must NOT be listed
+// as a hard inject: doing so would park the whole package whenever the locale
+// provider is absent, for a dictionary we already carry an inline fallback for.
+const declaresLocale = /inject\s*=\s*\[[^\]]*'locale'/.test(clientSource)
+check(!declaresLocale, 'the client does not hard-inject "locale" (it is read optionally via ctx.get)')
+check(clientSource.includes("ctx.get('locale')"),
+  '  -> and it does read locale through the ungated ctx.get')
+check(/ctx\.get\('slots'\)/.test(clientSource) || /ctx\.slots\b/.test(clientSource),
+  'the client reaches the slots service')
+
 try {
   new vm.Script(clientSource)
   check(true, 'the bundle parses as a classic script')
