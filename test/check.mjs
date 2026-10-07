@@ -210,22 +210,89 @@ if (!ensurePeers()) {
 
   section('RPC http guards')
 
-  // Capture the route handler that `installRoutes` registers on the browser
-  // carrier, then drive it directly.
-  let routeHandler = null
-  const fakeCtx = {
-    logger: { warn() {}, info() {} },
-    settings: { describe: async () => [] },
-    inject: (names, cb) => {
-      cb({
-        effect: (fn) => fn(),
-        webServer: { register: (options) => { routeHandler = options.handler; return () => {} } },
-        connection: { fetch: { register: () => () => {} } },
-      })
-    },
+  // Build a fake host ctx, capturing whichever carrier the module chooses.
+  // `get` mirrors cordis's ungated service accessor; `inject` mirrors the
+  // optional-service callback.
+  const captured = { webServer: null, fetch: null }
+  const fakeHostCtx = ({ withConnection = true } = {}) => {
+    // Reset first: `captured` is shared, so a stale route from an earlier
+    // scenario would read as "this carrier registered" when it did not.
+    captured.webServer = null
+    captured.fetch = null
+    const services = {
+      webServer: { register: (options) => { captured.webServer = options; return () => {} } },
+      ...(withConnection
+        ? { connection: { fetch: { register: (route) => { captured.fetch = route; return () => {} } } } }
+        : {}),
+    }
+    const ctx = {
+      logger: { warn() {}, info() {} },
+      settings: { describe: async () => [] },
+      // cordis's `ctx.get(name, strict = true)`; `false` skips the inject gate.
+      get: (name) => services[name],
+    }
+    // The injected sub-context keeps the same accessors plus the injected ones.
+    ctx.inject = (names, cb) => {
+      cb({ ...ctx, effect: (fn) => fn(), webServer: services.webServer })
+    }
+    return ctx
   }
-  const disposeRoutes = installRoutes(fakeCtx, manager, { logger: { warn() {}, info() {} } })
-  check(typeof routeHandler === 'function', 'installRoutes registered the browser route handler')
+
+  /*
+   * The PREFERRED carrier is the connection's Fetch registry, and the reason is
+   * security, not convenience: DSH's own `/api` prefix route serves that
+   * registry, and its handler calls `connection.admit(req)` — the Host/Origin
+   * fence AND the browser-auth cookie check — before dispatching to any
+   * registered Fetch route. Registering here inherits the harness policy.
+   *
+   * A `webServer` exact route on the same path is matched BEFORE the `/api`
+   * prefix route (`dsh-host-webserver` `match()` tries the exact table first),
+   * so it SHADOWS the `/api` route and silently drops both the fence and the
+   * authentication. That was a real defect here: `/api/dsh-codespace-workspace/rpc`
+   * answered 200 with no session cookie, while DSH's own `/api` paths answered
+   * 401. This assertion is what keeps that from coming back.
+   */
+  const disposePreferred = installRoutes(fakeHostCtx(), manager, { logger: { warn() {}, info() {} } })
+  check(captured.fetch !== null, 'the rpc route registers on connection.fetch (inherits the /api fence + auth)')
+  eq('  -> and does NOT also register a shadowing webServer exact route', captured.webServer, null)
+  eq('  -> on the documented path', captured.fetch?.path, shared.RPC_ROUTE)
+  eq('  -> accepting only POST', JSON.stringify(captured.fetch?.methods), JSON.stringify(['POST']))
+  eq('  -> with a buffered request body', captured.fetch?.requestBody, 'buffered')
+
+  const post = (body) => captured.fetch.fetch(new Request(`http://127.0.0.1:19387${shared.RPC_ROUTE}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  }))
+
+  const badRes = await post({ action: 'nope' })
+  eq('the fetch carrier answers HTTP 200 even for a bad action', badRes.status, 200)
+  const badBody = await badRes.json()
+  eq('  -> with ok:false', badBody.ok, false)
+  eq('  -> and the documented code', badBody.error?.code, 'E_UNKNOWN_ACTION')
+
+  const goodRes = await post({ action: shared.ACTIONS.WORKSPACES })
+  eq('the fetch carrier resolves a valid action', (await goodRes.json()).ok, true)
+
+  const unparseable = await captured.fetch.fetch(new Request(`http://127.0.0.1:19387${shared.RPC_ROUTE}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json',
+  }))
+  eq('an unparseable body is still HTTP 200', unparseable.status, 200)
+  eq('  -> reporting E_BAD_REQUEST', (await unparseable.json()).error?.code, 'E_BAD_REQUEST')
+
+  disposePreferred()
+  check(true, 'the fetch-carrier disposer ran without throwing')
+
+  // Fallback for a composition with no connection service: the module must
+  // still serve the route, and because an exact route shadows the harness fence
+  // it must apply the fence itself. These are the guard tests.
+  let routeHandler = null
+  const disposeRoutes = installRoutes(fakeHostCtx({ withConnection: false }), manager, { logger: { warn() {}, info() {} } })
+  routeHandler = captured.webServer?.handler
+  check(typeof routeHandler === 'function', 'with no connection service the webServer fallback registers')
+  eq('  -> on the documented path', captured.webServer?.path, shared.RPC_ROUTE)
+  eq('  -> as an exact route', captured.webServer?.kind, 'exact')
+  eq('  -> and the fetch carrier is not used', captured.fetch, null)
 
   /**
    * Drive the registered HTTP handler.
@@ -234,10 +301,11 @@ if (!ensurePeers()) {
    * must be a real async iterable — an EventEmitter-shaped `on('data')` stub
    * silently yields an EMPTY body, which looks exactly like a bad action.
    */
-  function drive({ method = 'POST', remoteAddress = '127.0.0.1', host = '127.0.0.1:19387', origin = 'http://127.0.0.1:19387', type = 'application/json', body = {}, dropOrigin = false } = {}) {
+  function drive({ method = 'POST', remoteAddress = '127.0.0.1', host = '127.0.0.1:19387', origin = 'http://127.0.0.1:19387', type = 'application/json', body = {}, dropOrigin = false, secFetchSite } = {}) {
     return new Promise((done) => {
       const headers = { host, 'content-type': type }
       if (!dropOrigin) headers.origin = origin
+      if (secFetchSite !== undefined) headers['sec-fetch-site'] = secFetchSite
       const text = JSON.stringify(body)
       const req = {
         method,
@@ -266,10 +334,33 @@ if (!ensurePeers()) {
   eq('GET is rejected with 405', (await drive({ method: 'GET' })).status, 405)
   eq('a non-loopback peer is rejected with 403',
     (await drive({ remoteAddress: '10.0.0.5' })).status, 403)
-  eq('a request with no Origin is rejected with 403', (await drive({ dropOrigin: true })).status, 403)
-  eq('a cross-origin request is rejected with 403',
+  eq('a non-loopback Host is rejected with 403',
+    (await drive({ host: 'evil.example', origin: 'http://evil.example' })).status, 403)
+  eq('a cross-origin Origin is rejected with 403',
     (await drive({ origin: 'http://evil.example' })).status, 403)
+  eq('Sec-Fetch-Site: cross-site is rejected with 403',
+    (await drive({ dropOrigin: true, secFetchSite: 'cross-site' })).status, 403)
   eq('a non-JSON content-type is rejected with 415', (await drive({ type: 'text/plain' })).status, 415)
+
+  // A request with NO Origin must be ACCEPTED. This is the desktop shell
+  // carrier's shape: it reaches the host through the connection's internal
+  // fetch, which attaches neither Origin nor Fetch-Metadata. DSH's own fence
+  // (`isTrustedApiRequest` in dsh-client-connection) returns true for a missing
+  // Origin, because the load-bearing check is the HOST -- the one header DNS
+  // rebinding cannot forge. An earlier revision of this route demanded an
+  // Origin and 403'd the whole desktop app with "Requests must be same-origin"
+  // while the Web GUI worked; this assertion is what pins that shut.
+  const noOrigin = await drive({ dropOrigin: true, body: { action: shared.ACTIONS.WORKSPACES } })
+  eq('a request with no Origin is ACCEPTED (the desktop carrier sends none)', noOrigin.status, 200)
+  eq('  -> and still resolves the action', JSON.parse(noOrigin.body).ok, true)
+
+  // 127/8 is loopback in full, not just 127.0.0.1, and localhost / [::1] count.
+  eq('another 127/8 address is accepted', (await drive({ host: '127.0.0.7:19387', origin: 'http://127.0.0.7:19387' })).status, 200)
+  eq('localhost is accepted', (await drive({ host: 'localhost:19387', origin: 'http://localhost:19387' })).status, 200)
+  eq('the IPv6 loopback is accepted', (await drive({ host: '[::1]:19387', origin: 'http://[::1]:19387' })).status, 200)
+  // A mismatched origin is still refused even though the Host is fine.
+  eq('a different loopback port in Origin is refused',
+    (await drive({ host: '127.0.0.1:19387', origin: 'http://127.0.0.1:9999' })).status, 403)
 
   const unknownRes = await drive({ body: { action: 'nope' } })
   eq('an action failure is answered with HTTP 200 (never a 4xx/5xx)', unknownRes.status, 200)
@@ -282,6 +373,57 @@ if (!ensurePeers()) {
 
   disposeRoutes()
   check(true, 'the route disposer ran without throwing')
+
+  /*
+   * The carrier choice must be self-healing, not a one-shot decision: service
+   * load order is not guaranteed, and settling for the weaker fallback because
+   * `connection` happened to be late would silently drop the harness fence and
+   * auth for the rest of the process.
+   */
+  section('rpc carrier upgrade')
+
+  const late = { webServer: null, fetch: null }
+  let fireConnectionInject = null
+  let webServerRouteDisposed = false
+  // A mutable registry read *through* the closure, so a context spread earlier
+  // still observes a service that is provided afterwards -- which is exactly
+  // the situation this section exists to cover.
+  const lateServices = {}
+  const lateBase = {
+    logger: { warn() {}, info() {} },
+    settings: { describe: async () => [] },
+    get: (name) => lateServices[name],
+  }
+  lateBase.inject = (names, cb) => {
+    cb({
+      ...lateBase,
+      effect: (fn) => fn(),
+      webServer: {
+        register: (options) => {
+          late.webServer = options
+          return () => { webServerRouteDisposed = true }
+        },
+      },
+      // Mirrors cordis: fires immediately if the service exists, else later.
+      inject: (more, ready) => { fireConnectionInject = ready },
+    })
+  }
+  const disposeLate = installRoutes(lateBase, manager, { logger: { warn() {}, info() {} } })
+  check(late.webServer !== null, 'with connection late, the fallback registers first')
+  eq('  -> and nothing is on the fetch carrier yet', late.fetch, null)
+
+  // `connection` arrives only now, after the fallback is already installed.
+  lateServices.connection = { fetch: { register: (route) => { late.fetch = route; return () => {} } } }
+  check(typeof fireConnectionInject === 'function', 'the late-injection hook was registered')
+  fireConnectionInject()
+
+  check(late.fetch !== null, 'when connection arrives the fetch carrier is registered')
+  eq('  -> on the documented path', late.fetch?.path, shared.RPC_ROUTE)
+  check(webServerRouteDisposed, '  -> and the shadowing webServer fallback is torn down')
+  eq('  -> leaving exactly one carrier (fetch)', late.fetch !== null && webServerRouteDisposed, true)
+
+  disposeLate()
+  check(true, 'the late-upgrade disposer ran without throwing')
 
   /* ---------------------------------------------------------------- *
    * 6. Shell quoting.

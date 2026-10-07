@@ -140,6 +140,44 @@ ctx.inject(['webServer'], (ready) => {
 })
 ```
 
+**Register on `connection.fetch`, NOT on a `webServer` exact route.** This was
+learned the hard way; do not "simplify" it back.
+
+DSH mounts its own `/api` route as a **prefix** route that first calls
+`connection.admit(req)` — the Host/Origin fence *and* the browser-auth cookie
+check — and only then hands the request to `createSharedFetchHandler`, which
+dispatches to whatever exact Fetch routes plugins registered under `/api`.
+Registering on `connection.fetch` therefore inherits the harness's security
+policy instead of re-implementing it, and serves the browser and the Desktop
+shell alike.
+
+`webServer.match()` tries the **exact table before the prefix table**, so a
+plugin-registered `{ kind: 'exact', path: '/api/...' }` route is matched first
+and **shadows the `/api` route entirely** — silently dropping both the fence and
+the authentication. That was a real defect in this plugin: measured against a
+live host,
+
+```
+POST /api/dsh-codespace-workspace/rpc   (no cookie, matching Origin)  -> 200
+POST /api/no-such-plugin-xyz            (no cookie, matching Origin)  -> 401 unauthorized
+```
+
+The second line is DSH's `/api` route refusing an unauthenticated caller; the
+first line shows our exact route bypassing it. The route is now registered on
+`connection.fetch` and the exact route survives only as a fallback for a
+composition with no `connection` service (where it must apply the fence itself).
+
+Two more details that matter:
+
+* `connection` is **not** in this module's `inject` list, so `ready.connection`
+  is gated by cordis and throws `cannot get property "connection" without
+  inject`. Read it through `ready.get('connection', false)` — the documented
+  ungated accessor, "Read a service from the store without the inject
+  requirement" — which returns `undefined` when nothing provides it.
+* `assertFetchRoute` requires the path to sit under `/api` and be non-empty:
+  `endpointFromPath('/api', path)` must not be `undefined`, i.e. the path must
+  be `/api/<segments>` with every segment matching `/^[A-Za-z0-9_$.-]+$/`.
+
 ### Client module
 
 * File is a lazy-CJS bundle loaded through the global loader:
@@ -520,6 +558,31 @@ same module loads the settings once per session, because `alwaysShowCloudButton`
 is read by the row patch and would otherwise stay unloaded until the settings
 page was opened.
 
+### Guards on the request (fallback carrier only)
+
+On the preferred `connection.fetch` carrier DSH applies these itself, and this
+plugin adds none. The list below describes the **fallback** `webServer` exact
+route, which must apply the fence itself because it shadows `/api`.
+
+Order: `405` wrong method → `403` non-loopback peer → `403` fence → `415` wrong
+content-type → `400` unparseable body → **`200` with `{ok:false}`** for every
+action outcome. An action failure is *data*, never a transport status.
+
+The fence is a faithful port of `isTrustedApiRequest` from
+`@deepseek-ai/dsh-client-connection`, and it must **not** be stricter:
+
+* `Host` must parse and its hostname must be loopback — `localhost`, `[::1]`, or
+  **any** `127/8` address (not just `127.0.0.1`).
+* `Sec-Fetch-Site: cross-site` is refused.
+* **An absent `Origin` is ACCEPTED** (`if (origin === void 0) return true`).
+  When present, `new URL(origin).host` must equal the request's Host.
+
+That last rule is load-bearing and was gotten wrong once: the desktop shell
+carrier sends neither `Origin` nor Fetch-Metadata, so requiring an Origin
+rejected the entire desktop app with `状态读取失败：Requests must be same-origin.`
+while the Web GUI (which does send `Origin`) worked fine. The load-bearing check
+is the **Host**, the one header DNS rebinding cannot forge.
+
 ## 7. Internal module interfaces (frozen — code against these)
 
 `lib/shared.js` is written already; read it before coding.
@@ -531,7 +594,8 @@ page was opened.
 export async function resolveToken(ctx, settings)   // → { token: string|null, source: 'settings'|'env'|'gh'|'none' }
 
 /** One REST call. Throws an Error carrying `.code` and `.status`. */
-export async function api(token, method, path, body)  // → parsed JSON (or {} for 204)
+export async function api(token, method, path, body, options)
+  // options: { signal, timeoutMs, retry, run }  → parsed JSON (or {} for 204)
 
 export async function getViewer(token)              // → { login, name }
 export async function listRepos(token)              // → [{ name, nameWithOwner, owner, isPrivate, isEmpty, defaultBranch }]
@@ -540,7 +604,9 @@ export async function listMachines(token, repo)     // → [{ name, displayName,
 export async function getPrebuild(token, repo)      // → boolean|null   (null = could not determine)
 export async function createCodespace(token, { repo, branch, machine, displayName, idleTimeoutMinutes })
 export async function startCodespace(token, name)
-export async function stopCodespace(token, name)
+export async function stopCodespace(token, name, options)
+  // options: { signal, timeoutMs, retry } — shutdown passes { retry: false } so a
+  // doomed call cannot consume the whole exit budget retrying.
 export async function deleteCodespace(token, name)
 /** Commit a README into a repo with no commits. */
 export async function seedEmptyRepo(token, { repo, branch, content })

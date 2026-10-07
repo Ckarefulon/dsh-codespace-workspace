@@ -50,7 +50,7 @@ const server = createServer(async (req, res) => {
     res.end(body)
   } catch {
     res.writeHead(404, { 'content-type': 'text/plain' })
-    res.end('not found: ' + rel)
+    res.end('not found: ' + url)
   }
 })
 

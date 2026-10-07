@@ -185,19 +185,35 @@ test/
 
 ## 验证
 
-三套自检，都不需要 token、`gh` 或真实 Codespace：
+四套自检，都不需要 token、`gh` 或真实 Codespace：
 
 ```bash
 # Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
-node test/check.mjs                # 81 项，全通过
+node test/check.mjs                # 111 项，全通过
 
 # 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
 node test/shutdown.mjs             # 31 项，全通过
 
+# 载体端到端：起真实的 dsh-host-webserver + dsh-client-connection，
+# 用真实签名 cookie 走真实 HTTP
+node test/e2e.mjs                  # 全通过（找不到已安装的 Harness 时自动 SKIP）
+
 # 浏览器侧：在真实 DOM 里跑真实 bundle，对着宿主 markup/CSS 的忠实副本
 node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
-                                   # 114 项，全通过
+                                   # 107 项，全通过
 ```
+
+`test/e2e.mjs` 是这套里最有价值的一个：它不驱动桩，而是从已安装的 Harness 里
+`import` **真实的** `dsh-host-webserver` 与 `dsh-client-connection`，注册真实的
+路由，然后对真实监听的端口发真实 HTTP。它证明的正是桩测不了的三件事：
+
+1. 路由能穿过 DSH 自己的 `/api` 前缀路由到达；
+2. **没有会话 cookie 的请求被 harness 拒掉（401）**——即路由没有遮住 fence 和鉴权；
+3. 用真实 launch-token 换来的**真实签名 cookie** 能打通，拿到 `{ok:true}`。
+
+它还**当场演示了影子风险**以证明自己有牙齿：故意在同路径注册一个 `webServer`
+exact 路由，匿名请求立刻从 401 变成 200（绕过了 fence）；撤掉它，401 回来。
+所以「匿名必须是 401」这句断言对载体是敏感的——这正是之前那版实现栽的地方。
 
 `test/shutdown.mjs` 覆盖的是「退出即停」这条最重要的可靠性要求——一个没停掉的
 Codespace 会按小时计费，而用户看不见也补不回来。它断言的是真正要紧的性质：
@@ -232,6 +248,54 @@ promise」的桩不持有任何 ref'd handle，进程会直接退出而不是触
 另外它抓到过一个真实的时序问题：`alwaysShowCloudButton` 原本只在设置页挂载时才
 读取，因此全新启动时行增强读到的是 `null`，开关实际上不生效。现在由行增强模块
 自己在拿到 owner claim 时读一次设置。
+
+### 真机（真实 GUI）上抓到的两个 bug
+
+这两个都不是桩能测出来的，必须对着跑起来的 DSH 才暴露；而且第一个的成因是
+**我自己的测试把 bug 写进了断言里**，所以它一直是绿的。
+
+**一、`状态读取失败：Requests must be same-origin.`**
+
+设置页的「状态」卡片一直红着，`GitHub CLI (gh)` 卡在「检查中…」。原因是 RPC
+路由上那道**自己手写的** Host/Origin fence 要求请求必须带 `Origin`，而桌面外壳
+的载体**两者都不带**（`Origin` 和 Fetch-Metadata 都没有），于是每一发都被 403。
+Web GUI 反而正常，因为浏览器会发 `Origin`——这就是它看起来「只坏一半」的原因。
+
+修法不是放宽自己那套，而是**逐字对齐 harness 自己的 `isTrustedApiRequest`**：它
+的第一条就是 `if (origin === void 0) return true`。承重的检查是 **Host**，因为
+`Host` 是 DNS rebinding 唯一伪造不了的头；`Origin` 与 `Sec-Fetch-Site` 只是补充。
+另外 `isLoopbackHostname` 接受 `localhost`、`[::1]` 和**整个 127/8**，不只是
+`127.0.0.1`。
+
+对着跑着的宿主复现过（旧代码）：不带 `Origin` → 403，带上匹配的 `Origin` → 200。
+
+**二、我自己的路由遮住了 harness 的鉴权（安全相关）**
+
+修好 fence 之后顺手量了一下，发现更值得修的一处：路由原本注册成 `webServer` 的
+**exact** 路由，而 webserver 的 `match()` 是**先查 exact 表、再查前缀表**，所以它
+比 DSH 自己的 `/api` **前缀**路由先命中，直接把 `/api` 那条路整个遮掉了——而
+fence 和浏览器鉴权（cookie）都挂在 `/api` 那条路上。实测（旧代码）：
+
+```
+POST /api/dsh-codespace-workspace/rpc   （无 cookie，Origin 匹配）-> 200
+POST /api/no-such-plugin-xyz            （无 cookie，Origin 匹配）-> 401 unauthorized
+```
+
+第二行是 DSH 在拒绝未鉴权调用；第一行说明我们的 exact 路由绕过了它。
+
+正确做法是注册到 `connection.fetch`：DSH 自己的 `/api` 前缀路由会先 `admit(req)`
+（Host/Origin fence **加上** cookie 鉴权），再 `bridge()` 派发到插件注册的 Fetch
+路由。这样等于白拿 harness 的安全策略，浏览器和桌面外壳还都能用。exact 路由现在
+只作为「composition 里根本没有 `connection` 服务」时的兜底保留。
+
+两个细节值得记：
+
+- `connection` 不在本模块的 `inject` 里，直接读 `ready.connection` 会被 cordis
+  门禁拦下（`cannot get property ... without inject`）。要用 `ctx.get(name, false)`
+  ——cordis 文档里写明的「不经 inject 读取服务」的公开入口。
+- 服务加载顺序没有保证，所以载体选择**不能是一次性判断**。`ready.inject(['connection'], ...)`
+  是公开的触发点（已实测：服务晚到时它会触发，永不出现时保持沉默且不抛），
+  于是晚到的 `connection` 会把兜底路由换掉，而不是让进程一直停在较弱的载体上。
 
 ## 已知限制
 
