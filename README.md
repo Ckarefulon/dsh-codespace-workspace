@@ -194,7 +194,7 @@ test/
 
 ```bash
 # Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
-node test/check.mjs                # 111 项，全通过
+node test/check.mjs                # 122 项，全通过
 
 # 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
 node test/shutdown.mjs             # 31 项，全通过
@@ -263,9 +263,9 @@ promise」的桩不持有任何 ref'd handle，进程会直接退出而不是触
 读取，因此全新启动时行增强读到的是 `null`，开关实际上不生效。现在由行增强模块
 自己在拿到 owner claim 时读一次设置。
 
-### 真机（真实 GUI）上抓到的两个 bug
+### 真机（真实 GUI）上抓到的 bug
 
-这两个都不是桩能测出来的，必须对着跑起来的 DSH 才暴露；而且第一个的成因是
+下面这些都不是桩能测出来的，必须对着跑起来的 DSH 才暴露；而且第一个的成因是
 **我自己的测试把 bug 写进了断言里**，所以它一直是绿的。
 
 **一、`状态读取失败：Requests must be same-origin.`**
@@ -444,6 +444,63 @@ setPrebuild(data.hasPrebuild === true ? true : false)   // null 被压成 false
 
 浏览器套件 136 → **147 项**，其中 8 项专测这三态（含「`null` 绝不能说成未配置」和
 「确认后绝不能说成已配置」两条否定断言）。
+
+**十、云端会话里本地工具根本没让位 —— 提示词说远程，手上还是本地**
+
+用户报「扫描工作区时环境与流程不一致」。顺着这条线查，抓到了这个插件**最核心那条
+承诺**上的一个真缺陷：`installRemoteTools` 从未真正执行过。
+
+成因是开头这三行：
+
+```js
+const tools = agentCtx?.tools;
+if (tools === undefined) return () => {};   // 静默放弃
+```
+
+`agent/created` 那一刻的 `agent.ctx` 是**作用域 ctx**，cordis 对没有写进 `inject` 的
+服务本应门禁报错（`cannot get property "x" without inject`）——**但这里偏偏不报**。
+`ReflectService.handler.get` 的最后三行是（已核对 `@deepseek-ai/cordis` `lib/index.js:680`）：
+
+```js
+if (!ctx.fiber.runtime) return ctx.reflect.get(prop, false);   // 退化成「不需要 inject」的读法
+```
+
+agent 作用域 ctx **没有运行中的 fiber**，于是这次读取降级成 `undefined` 而不是抛错。
+于是整个函数变成空操作：**没有报错、console 干净、远程工具一个没注册、本地
+`read`/`write`/`edit`/`bash` 全部照旧可用**；而 `session.js` 在同一时刻已经把
+「你这个会话操作的是云端 Codespace」写进了系统提示词。两边就是这么对不上的。
+
+DSH 自己的写法在 `dsh-file-reference-local` 里给得很清楚
+（`lib/index.js:342`）：`agent.ctx.inject(["systemPrompt","tools"], (scope) => …)`。
+**等工具服务就绪再安装**是唯一正确的做法，现在也照这个改：
+
+```js
+fiber = agentCtx.inject(['tools'], (scope) => {
+  const tools = scope.tools            // ← 只能从 scope 拿，不能从 agentCtx 拿
+  …
+})
+```
+
+关键细节是服务要**从 `inject` 回调的 `scope` 参数上取**：只有 `inject` 新建的那个
+fiber 的 store 里才有 `tools`，`agentCtx` 上永远没有。收尾用 `fiber.dispose()`。
+
+顺带澄清一处容易混的地方：上文「二」里 `ctx.get(name, false)` 那个「不经 `inject`
+读服务」的口子，解决的是**「服务可选、要探测在不在」**的问题；而这里的问题是
+**作用域** —— 注册远程工具要的是 agent 作用域里的那个 `tools` 实例，只有 `inject`
+新建的那个 fiber 的 store 里有它。我没有去核实 `get` 能不能从 agent ctx 上摸到同一个
+实例，也没必要：`inject` 是 DSH 自己的做法，抄它就对了。
+
+`check` 111 → **122 项**，新增的 11 项专测这条接线，覆盖三种情形：工具已就绪、工具
+**晚到**、以及根本没有 `agent.ctx`。改完后我把源码退回旧写法反向验证了一次，两项立刻
+变红：
+
+```
+FAIL when tools arrives, the remote surface is installed -- got "", want "read,write,edit,glob,grep,bash"
+FAIL   -> and the local tools are hidden
+```
+
+这正是它值得存在的理由：一个「静默空操作」的 bug，只有故意让它失败一次，才能证明测试
+真的看得见它。
 
 ## 已知限制
 

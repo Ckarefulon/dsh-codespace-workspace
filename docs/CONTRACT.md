@@ -108,6 +108,22 @@ Service name is **`workspaceRegistry`** (`WorkspaceRegistry extends Service`,
   per-agent behaviour on `agent.ctx` inside one `agent.ctx.effect()` **and**
   keep that disposer keyed by agent in our own plugin effect, because unloading
   the plugin does not dispose `agent.ctx` registrations by itself.
+* **Do NOT read `agent.ctx.tools` directly at `agent/created` time.** It is
+  `undefined` there, and it fails *quietly*, which is what makes it dangerous:
+  cordis' `ReflectService.handler.get` ends with
+  `if (!ctx.fiber.runtime) return ctx.reflect.get(prop, false)` (verified in
+  `@deepseek-ai/cordis` `lib/index.js:680`), and the agent scope carries no
+  running fiber, so the lookup degrades to the no-inject-required read instead of
+  throwing `cannot get property "tools" without inject`. A `undefined` read is
+  then easy to turn into a silent no-op — which is exactly what shipped once: the
+  agent kept its local `read`/`glob`/`pwsh`, never got the remote surface, and
+  nothing was logged. The symptom was an agent scanning the empty placeholder
+  directory on Windows while its system prompt said it was in the cloud.
+  Wait for the service with **`agent.ctx.inject(['tools'], (scope) => …)`** — the
+  same idiom DSH's own `dsh-file-reference-local` uses (`lib/index.js:342`). Read
+  the service off the **`scope`** argument, never off `agentCtx`: only the scope
+  created by `inject` has it in its fiber store. It returns a fiber whose
+  `dispose()` tears the registration down.
 * `agent.ctx.effect(fn, label)`; `agent.session.header.cwd` is the session's
   working directory — this is how we decide whether an agent is a Codespace
   agent.
@@ -811,6 +827,14 @@ export function installRemoteTools(agent, { manager, workspaceId, target, localT
 Must register `read`, `write`, `edit`, `glob`, `grep`, `bash` in the agent
 scope and restrict the local counterparts. It receives the agent context and
 must do all registration inside one `agent.ctx.effect()`.
+
+It must **wait for the `tools` service** via
+`agent.ctx.inject(['tools'], (scope) => …)` rather than reading
+`agent.ctx.tools` eagerly: the agent scope has no running fiber, so that read
+returns `undefined` instead of throwing, and treating it as "nothing to do"
+installs no remote surface at all — silently, with no error — leaving the agent
+on its LOCAL tools while the prompt claims it is in the cloud. Take the service
+from the **`scope`** argument. The returned disposer disposes that fiber.
 
 ### `lib/host/session.js`
 

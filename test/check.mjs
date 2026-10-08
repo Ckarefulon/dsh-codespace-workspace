@@ -426,6 +426,110 @@ if (!ensurePeers()) {
   check(true, 'the late-upgrade disposer ran without throwing')
 
   /* ---------------------------------------------------------------- *
+   * 5b. installRemoteTools must WAIT for the agent's tools service.
+   *
+   * The bug this pins: reading `agent.ctx.tools` at `agent/created` time and
+   * returning a no-op when it was undefined. The tools service is not always
+   * provided that early, and the old code then installed NOTHING while logging
+   * nothing -- so a Codespace session kept its local read/glob/pwsh and scanned
+   * the empty placeholder directory on Windows while the system prompt claimed
+   * it was in the cloud. Nothing surfaced because there was no error to see.
+   * ---------------------------------------------------------------- */
+
+  section('remote tools wiring')
+
+  const { installRemoteTools } = await load('../lib/host/remote-tools.js')
+  check(typeof installRemoteTools === 'function', 'installRemoteTools is exported')
+
+  /**
+   * Build a fake agent whose `tools` service arrives only when `inject` fires.
+   *
+   * @param {{toolsReady?: boolean}} [options] - whether `tools` exists up front.
+   */
+  function fakeAgent({ toolsReady = false } = {}) {
+    const registered = []
+    const restricted = []
+    const toolsService = {
+      register: (definition) => { registered.push(definition.name); return () => {} },
+      restrict: (filter) => { restricted.push(filter); return () => {} },
+      get: () => ({ name: 'present' }),
+    }
+    const injected = []
+    const agentCtx = {
+      effect: (fn) => { fn(); return () => {} },
+      ...(toolsReady ? { tools: toolsService } : {}),
+      // Mirrors cordis: `inject(names, cb)` starts a fiber once the service is
+      // available, and hands the callback a scope that carries it.
+      inject: (names, cb) => {
+        injected.push(names.join(','))
+        if (toolsReady) cb({ tools: toolsService })
+        return { dispose: () => {} }
+      },
+    }
+    return {
+      agent: { id: 'agent-1', ctx: agentCtx },
+      registered,
+      restricted,
+      injected,
+      /** Fire the deferred injection, as cordis would when the service appears. */
+      arrive: () => { cbHolder.cb({ tools: toolsService }) },
+      toolsService,
+    }
+  }
+  // `arrive` needs the callback; capture it through the inject spy.
+  const cbHolder = { cb: null }
+
+  const remoteManager = { recordOf: () => ({ path: '/workspace' }), log: () => {} }
+
+  // (a) The service is already there: register immediately.
+  {
+    const fake = fakeAgent({ toolsReady: true })
+    const dispose = installRemoteTools(fake.agent, {
+      manager: remoteManager, workspaceId: 'ws-1', target: { kind: 'gh', codespace: 'cs', cwd: '/workspace' },
+      localToolNames: ['read', 'glob', 'bash', 'pwsh'],
+    })
+    eq('with tools ready, all six remote tools are registered',
+      fake.registered.join(','), 'read,write,edit,glob,grep,bash')
+    check(fake.restricted.length === 1, 'and the local counterparts are restricted away')
+    eq('  -> the deny list covers the local names',
+      JSON.stringify(fake.restricted[0].deny), JSON.stringify(['read', 'glob', 'bash', 'pwsh']))
+    dispose()
+    check(true, 'the disposer ran without throwing')
+  }
+
+  // (b) The service is NOT there yet: the fix must defer, not give up.
+  {
+    const fake = fakeAgent({ toolsReady: false })
+    // Capture the callback so the test can deliver the service late.
+    fake.agent.ctx.inject = (names, cb) => {
+      fake.injected.push(names.join(','))
+      cbHolder.cb = cb
+      return { dispose: () => {} }
+    }
+    const dispose = installRemoteTools(fake.agent, {
+      manager: remoteManager, workspaceId: 'ws-2', target: { kind: 'gh', codespace: 'cs', cwd: '/workspace' },
+      localToolNames: ['read', 'glob', 'bash', 'pwsh'],
+    })
+    eq('with tools late, it waits on the tools service', fake.injected.join(','), 'tools')
+    eq('  -> and registers nothing yet', fake.registered.length, 0)
+
+    // The service appears; the deferred callback must now do the work.
+    cbHolder.cb({ tools: fake.toolsService })
+    eq('when tools arrives, the remote surface is installed',
+      fake.registered.join(','), 'read,write,edit,glob,grep,bash')
+    check(fake.restricted.length === 1, '  -> and the local tools are hidden')
+    dispose()
+    check(true, 'the deferred disposer ran without throwing')
+  }
+
+  // (c) No agent context at all: a no-op, but never a throw.
+  {
+    const dispose = installRemoteTools({}, { manager: remoteManager, workspaceId: 'ws-3', target: { kind: 'gh', codespace: 'cs', cwd: '/' } })
+    eq('an agent without a context installs nothing', typeof dispose, 'function')
+    dispose()
+  }
+
+  /* ---------------------------------------------------------------- *
    * 6. Shell quoting.
    * ---------------------------------------------------------------- */
 
