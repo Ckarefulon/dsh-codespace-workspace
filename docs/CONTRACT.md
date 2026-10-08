@@ -315,11 +315,32 @@ where the requirement places it. It is therefore a DOM augmentation instead.
   renderers cannot drift, and the browser suite asserts the weight.
 * **The launcher glyph is a cloud PLUS the add mark**, echoing the host's own
   `IconProjectAddOutlineRegular` (folder + plus) on the button beside it. The plus
-  strokes are copied verbatim from that artwork; the cloud is scaled into the
-  lower-left by a `<g transform>` carrying `vector-effect="non-scaling-stroke"`, so
-  the scale does not thin the stroke. The two pieces must not touch — check with
-  `getBoundingClientRect()` relative to the `<svg>`, because **`getBBox()` ignores
-  an element's own transform** and reports the unscaled box.
+  strokes are copied verbatim from that artwork.
+* **Keep the cloud at full size and BREAK its outline where the plus crosses** —
+  do not shrink the cloud to dodge the plus, which is what an earlier revision
+  did. The host's folder keeps its full size and has its top-right carved open for
+  the plus; this is the same idea. The cloud path is used unmodified and drawn
+  through an SVG `<mask>`: a white 16x16 plate, then each plus stroke painted
+  black at `CLOUD_MASK_BAND` (2.6) width, so the outline is erased along the band
+  the plus occupies.
+  * A mask rather than hand-cut subpaths: the outline meets the plus in **two**
+    places (the vertical stroke crosses the right lobe at `y = 6.706`, and the
+    horizontal stroke's *band* also clips the big arc near `x = 9.76`), and
+    hand-deriving both cut points would have to be kept in step with the artwork
+    forever.
+  * `stroke-linecap="butt"` on the cut strokes: a round cap would extend half a
+    band past the plus's lower tip and can bite a detached sliver out of the lobe.
+  * Each glyph needs its **own** mask id (`maskUnits="userSpaceOnUse"`). Ids are
+    document-global, so two glyphs sharing one would make the second resolve
+    `url(#id)` to the first.
+* **A structural assertion cannot prove a mask erases anything**: a wrong mask
+  colour, a missing `maskUnits`, or a colliding id all still render a perfectly
+  good cloud. The browser suite therefore rasterises the glyph twice — once as
+  built and once with only the `mask` attribute stripped — and diffs the two, so
+  the erased ink is measured rather than assumed. Do not replace that with a
+  hand-picked sample box or a per-column blank test: the outline is curved, so a
+  gap does not blank its column, and a fixed box runs into either antialiasing
+  fringe or the plus's own ink.
 * **The launcher must stay LEFT of 添加工作区**, which is subtler than it looks:
   * `headerActions` may contain a **tooltip bubble**: the host's `Tooltip` is not
     portalled here (the workspace header passes no `portal` prop), so React renders

@@ -234,6 +234,43 @@ async function tooltipFor(element) {
   return text
 }
 
+/**
+ * Rasterise an SVG to an alpha mask, at `size` px square over the 16x16 viewBox.
+ *
+ * Structural assertions cannot prove a mask *removes* anything: a mask with the
+ * wrong colour, a missing `maskUnits`, or a colliding id all still render a
+ * perfectly good cloud. Only the pixels can tell that the break exists.
+ *
+ * Drawing through a canvas data URL also means this goes through the same
+ * renderer that paints the icon on screen.
+ *
+ * @param {SVGElement} svg - the glyph to draw.
+ * @param {number} size - raster size in px.
+ * @returns {Promise<{alpha: Uint8Array, size: number}>} per-pixel alpha.
+ */
+async function rasterAlpha(svg, size = 256) {
+  const clone = svg.cloneNode(true)
+  clone.setAttribute('width', String(size))
+  clone.setAttribute('height', String(size))
+  clone.setAttribute('stroke', '#fff')
+  const markup = new XMLSerializer().serializeToString(clone)
+  const image = new Image()
+  await new Promise((resolve, reject) => {
+    image.onload = resolve
+    image.onerror = () => reject(new Error('the glyph could not be rasterised'))
+    image.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(markup)
+  })
+  const canvas = document.createElement('canvas')
+  canvas.width = size
+  canvas.height = size
+  const ctx = canvas.getContext('2d')
+  ctx.drawImage(image, 0, 0, size, size)
+  const data = ctx.getImageData(0, 0, size, size).data
+  const alpha = new Uint8Array(size * size)
+  for (let i = 0; i < alpha.length; i += 1) alpha[i] = data[i * 4 + 3]
+  return { alpha, size }
+}
+
 section('section-header launcher')
 
 const header = document.querySelector('[class*="_sectionHeader"]')
@@ -258,26 +295,93 @@ eq('the launcher does NOT use the OS bubble', launcher.getAttribute('title'), nu
 eq('the launcher has a DSH tooltip', await tooltipFor(launcher), '新建云端工作区')
 check(launcher.querySelector('svg') !== null, 'the launcher holds the cloud svg')
 
-// The glyph must be the cloud PLUS the add mark, like the host's own "add"
-// control. The plus is the host's own `IconProjectAddOutlineRegular` strokes.
+// The glyph must be the FULL-SIZE cloud PLUS the add mark, composed the way the
+// host's own "add" control is: the outline keeps its size and is simply broken
+// where the plus crosses it. Nothing is scaled and nothing is displaced.
 {
   const svg = launcher.querySelector('svg')
-  const parts = svg.querySelectorAll('g[transform]')
-  eq('the launcher glyph composes a cloud and a plus', parts.length, 2)
-  eq('  -> drawn with three paths (1 cloud + 2 plus strokes)', svg.querySelectorAll('path').length, 3)
-  // Rendered geometry, because getBBox() ignores the element's own transform.
+  // Only the DRAWN paths matter; the mask's own cut-out paths live under <defs>
+  // and legitimately carry a stroke-width (the band they knock out).
+  const drawn = [...svg.querySelectorAll(':scope > path')]
+  eq('the launcher glyph keeps the cloud at full size', svg.querySelectorAll('g[transform]').length, 0)
+  eq('  -> no per-path stroke-width is introduced',
+    drawn.filter((p) => p.getAttribute('stroke-width') !== null).length, 0)
+
+  // The two plus strokes are the host's, copied verbatim.
+  const ds = drawn.map((p) => p.getAttribute('d'))
+  check(ds.includes('M9.75977 4.50208H14.5509') && ds.includes('M12.1492 6.89758L12.1492 2.10642'),
+    '  -> the plus is the host artwork, copied verbatim')
+  eq('  -> and the cloud is the plain cloud path, unmodified',
+    ds.filter((d) => d === 'M11.667 12.667H6a4.667 4.667 0 1 1 4.473-6h1.193a3 3 0 1 1 0 6Z').length, 1)
+
+  // The break is a mask whose cut-outs follow the plus strokes.
+  const mask = svg.querySelector('mask')
+  check(mask !== null, '  -> the break is made with a mask')
+  if (mask !== null) {
+    const cuts = [...mask.querySelectorAll('path')]
+    eq('  -> the mask cuts exactly the plus strokes', cuts.length, 2)
+    eq('  -> with the documented band width', cuts[0].getAttribute('stroke-width'), '2.6')
+    eq('  -> and butt caps, so the cut stops at the stroke ends',
+      cuts[0].getAttribute('stroke-linecap'), 'butt')
+    eq('  -> the cloud is drawn through it',
+      svg.querySelector('path[mask]')?.getAttribute('mask'), 'url(#' + mask.getAttribute('id') + ')')
+  }
+  eq('  -> the visible strokes are the cloud plus the two plus strokes', drawn.length, 3)
+
+  // Full size: the cloud must still fill the box, exactly as the plain one does.
+  // Compare the PATH boxes, not the <svg> elements: the svg is always 16x16, so
+  // comparing those would pass even for a cloud that had been shrunk inside it.
   const sr = svg.getBoundingClientRect()
   const unit = sr.width / 16
-  const rect = (el) => el.getBoundingClientRect()
-  const cloud = rect(parts[0])
-  const plusBottom = Math.max(...[...parts[1].querySelectorAll('path')].map((p) => rect(p).bottom))
-  check(plusBottom <= cloud.top + 0.5,
-    '  -> the cloud does not collide with the plus',
-    `gap ${Math.round((cloud.top - plusBottom) / unit * 100) / 100} units`)
-  check(cloud.left - sr.left >= -0.5 && cloud.right - sr.left <= sr.width + 0.5,
-    '  -> and the pair stays inside the viewBox',
-    `cloud x ${Math.round((cloud.left - sr.left) / unit * 100) / 100}..${Math.round((cloud.right - sr.left) / unit * 100) / 100}`)
+  const cloudBox = svg.querySelector('path[mask]').getBoundingClientRect()
+  const plainPath = document.querySelector('[data-dsh-codespace-icon] svg path')
+  if (plainPath !== null) {
+    const pb = plainPath.getBoundingClientRect()
+    const round1 = (v) => Math.round(v * 10) / 10
+    eq('  -> the add-cloud keeps the plain cloud\'s footprint',
+      `${round1(cloudBox.width / unit)}x${round1(cloudBox.height / unit)}`,
+      `${round1(pb.width / unit)}x${round1(pb.height / unit)}`)
+  }
+  check(cloudBox.left - sr.left >= -0.5 && cloudBox.right - sr.left <= sr.width + 0.5,
+    '  -> and stays inside the viewBox')
+
+  /*
+   * The structural checks above cannot prove the mask actually REMOVES ink: a
+   * mask with the wrong colour, a missing `maskUnits`, or a colliding id all
+   * still render a perfectly good cloud.
+   *
+   * So rasterise the glyph twice — once as built, once with only the mask
+   * reference stripped off the cloud path — and diff them. Everything the mask
+   * erases shows up as pixels that are inked in the second render and blank in
+   * the first. This is geometry-independent: it needs no hand-picked sample box,
+   * which two earlier revisions of this check got wrong.
+   */
+  {
+    const unmasked = svg.cloneNode(true)
+    unmasked.querySelector('path[mask]').removeAttribute('mask')
+    const withMask = await rasterAlpha(svg)
+    const withoutMask = await rasterAlpha(unmasked)
+    let erased = 0
+    let kept = 0
+    for (let i = 0; i < withMask.alpha.length; i += 1) {
+      if (withMask.alpha[i] > 40) kept += 1
+      if (withoutMask.alpha[i] > 40 && withMask.alpha[i] <= 40) erased += 1
+    }
+    check(erased > 20, '  -> the mask erases real ink from the outline',
+      `${erased} px erased (${Math.round((erased / Math.max(1, kept + erased)) * 100)}% of the outline)`)
+    check(kept > erased * 3, '  -> while keeping the bulk of the glyph',
+      `${kept} px kept`)
+  }
 }
+
+// Two glyphs on one page must not share a mask id: the browser resolves
+// `url(#id)` to the first match, so a collision would silently apply the wrong
+// mask. (The settings card renders one, the launcher another.)
+{
+  const ids = [...document.querySelectorAll('[data-dsh-codespace-launcher] mask')].map((m) => m.getAttribute('id'))
+  eq('every cloud+plus glyph gets its own mask id', new Set(ids).size, ids.length)
+}
+
 
 // Metrics: it must match the host's HEADER icon control, which is
 // `WorkspaceBrowser`'s 28x28 `_iconButton` -- not `Rows`' 16x16 one. It also
@@ -298,7 +402,7 @@ check(getComputedStyle(launcher).backgroundColor === 'rgba(0, 0, 0, 0)',
 const cloudSvg = launcher.querySelector('svg')
 eq('the cloud glyph uses the host Regular stroke width', cloudSvg.getAttribute('stroke-width'), '1')
 eq('the cloud path carries no stroke-width of its own',
-  cloudSvg.querySelector('path').getAttribute('stroke-width'), null)
+  cloudSvg.querySelector('path[mask]').getAttribute('stroke-width'), null)
 check(launcherBox.right <= addBox.left + 1, 'the launcher is laid out to the left of the add control',
   `launcher.right=${Math.round(launcherBox.right)} add.left=${Math.round(addBox.left)}`)
 check(launcherBox.left >= headerActions.getBoundingClientRect().left - 1,
