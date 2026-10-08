@@ -117,9 +117,12 @@ let settings = {
 }
 
 const rpcCalls = []
+/** Overridable per-test responses, keyed by action. */
+const rpcOverrides = new Map()
 function rpcResponse(body) {
   rpcCalls.push(body.action)
   const ok = (data) => ({ status: 200, ok: true, json: async () => Object.assign({ ok: true }, data) })
+  if (rpcOverrides.has(body.action)) return ok(rpcOverrides.get(body.action)(body))
   if (body.action === 'workspaces') return ok({ workspaces: [record] })
   if (body.action === 'get-settings') return ok({ settings, secrets: { githubToken: { set: false }, sshKeyPath: { set: false } } })
   if (body.action === 'status') return ok({ gh: { installed: false, version: '', authenticated: false, login: '' }, tokenSource: 'none', configured: false, secrets: {} })
@@ -479,6 +482,11 @@ eq('and the widened max-width returns afterwards', getComputedStyle(headerAction
 // Clicking it opens the create window. The overlay is mounted, so this asserts
 // the real path: DOM click → ui.openCreate() → the store → the overlay renders
 // the single multi-step window (which fetches the repository list on mount).
+//
+// The wizard loads its repository list in a `useEffect(..., [])`, i.e. ONCE per
+// mount, so the per-case overrides below must be installed BEFORE this first
+// click: reopening the window later does not re-fetch, and the repo step would
+// show "没有匹配的仓库" instead.
 rpcCalls.length = 0
 launcher.dispatchEvent(new MouseEvent('click', { bubbles: true }))
 await settle(120)
@@ -486,6 +494,120 @@ const overlayTree = overlay.tree
 check(overlayTree !== null && overlayTree !== undefined,
   'clicking the launcher renders the overlay window', JSON.stringify(overlayTree))
 check(rpcCalls.includes('list-repos'), 'the create window loads the repository list', rpcCalls.join(','))
+
+/* ------------------------------------------------------------------ *
+ * 4b. The prebuild notice is a TRI-state, not a boolean.
+ *
+ * `hasPrebuild` is `true | false | null`. The wizard used to collapse `null`
+ * into `false`, which reports the plugin's own read failure as a fact about the
+ * user's repository ("未配置预构建"). The distinction is real: measured across
+ * 15 repositories, `prebuild_availability` only ever comes back `null` or
+ * `"ready"`, so a readable-but-null field genuinely means "no prebuild", while a
+ * failed read means "unknown" and deserves different words.
+ * ------------------------------------------------------------------ */
+
+section('prebuild notice')
+
+/**
+ * Drive the wizard from the repo list to the machine step, with one repository,
+ * no existing Codespace, and a chosen prebuild answer.
+ *
+ * The wizard loads `list-repos` in a `useEffect(..., [])` — once per MOUNT — so
+ * each case remounts the overlay with its overrides already installed. Reopening
+ * the window alone is not enough: it keeps the previous mount's repository list
+ * and the repo step renders "没有匹配的仓库".
+ */
+let overlayHandle = overlay
+async function reachMachineStep(prebuildResult) {
+  rpcOverrides.set('list-repos', () => ({
+    repos: [{ name: 'demo', nameWithOwner: 'me/demo', isPrivate: false, isEmpty: false, defaultBranch: 'main' }],
+    truncated: false,
+  }))
+  rpcOverrides.set('list-codespaces', () => ({ codespaces: [] }))
+  rpcOverrides.set('machines', () => ({ machines: [{ name: 'small', displayName: 'Small', cpus: 2, memoryGb: 4, storageGb: 32, gpu: false }] }))
+  rpcOverrides.set('prebuild', () => ({ hasPrebuild: prebuildResult }))
+
+  // Fresh mount: the slot component reads the UI store, so it opens with the
+  // window state the launcher click left behind.
+  overlayHandle.unmount()
+  overlayHandle = mountSlot('shell.overlay')
+  await settle(240)
+
+  const search = (predicate) => overlayHandle.search(predicate)
+
+  // Step 1: pick the repository. `Choice` is our own component, so the click is
+  // a prop on the rendered host node rather than a DOM event.
+  const repoChoice = search((v) => typeof v.props?.onClick === 'function' && String(v.props?.className ?? '').includes('dcw-choice'))[0]
+  if (repoChoice === undefined) return 'no repository row rendered'
+  repoChoice.props.onClick()
+  await settle(220)
+
+  // Step 2: with no Codespace the flow pre-selects "create a new one"; advance.
+  const next = search((v) => v.type === 'button' && String(v.props?.children ?? '') === '下一步')[0]
+  if (next === undefined) return 'no next button on the Codespace step'
+  next.props.onClick()
+  await settle(240)
+  return null
+}
+
+/** Text of every rendered host vnode in the current overlay mount. */
+function overlayText() {
+  return overlayHandle.search(() => true)
+    .flatMap((vnode) => (typeof vnode.props?.children === 'string' ? [vnode.props.children] : []))
+    .join(' | ')
+}
+
+
+// (a) A confirmed prebuild.
+{
+  const problem = await reachMachineStep(true)
+  const text = overlayText()
+  eq('the wizard reaches the machine step', problem, null)
+  check(text.includes('已配置预构建'), '  -> true renders the "has a prebuild" notice', text.slice(0, 200))
+}
+
+// (b) Readable, and there is genuinely no prebuild.
+{
+  const problem = await reachMachineStep(false)
+  const text = overlayText()
+  eq('the wizard reaches the machine step again', problem, null)
+  check(text.includes('未配置预构建'), '  -> false renders the "no prebuild" notice', text.slice(0, 200))
+  check(text.includes('直接创建'), '  -> and offers to create anyway', text.slice(0, 200))
+}
+
+// (c) The read failed: unknown, and it must NOT be reported as "not configured".
+{
+  const problem = await reachMachineStep(null)
+  const text = overlayText()
+  eq('the wizard reaches the machine step with an unknown prebuild', problem, null)
+  check(!text.includes('未配置预构建'),
+    '  -> null does NOT claim the repository has no prebuild', text.slice(0, 240))
+  check(text.includes('无法确认'), '  -> it says the status could not be read', text.slice(0, 240))
+  check(!text.includes('直接创建'),
+    '  -> and offers no "create anyway" choice, because there is nothing to decide', text.slice(0, 240))
+}
+
+// Acknowledging the "no prebuild" notice must not flip it into "has a prebuild".
+{
+  await reachMachineStep(false)
+  const proceed = overlayHandle.search((v) => v.type === 'button' && String(v.props?.children ?? '') === '直接创建')[0]
+  check(proceed !== undefined, 'the "create anyway" button is present to acknowledge with')
+  if (proceed !== undefined) {
+    proceed.props.onClick()
+    await settle(100)
+    const text = overlayText()
+    check(!text.includes('已配置预构建'),
+      '  -> after acknowledging, it does NOT claim a prebuild exists', text.slice(0, 240))
+  }
+}
+
+// Leave a mounted overlay with the window closed, for the sections below.
+{
+  const close = overlayHandle.search((v) => v.type === 'button' && v.props?.['aria-label'] === '关闭')[0]
+  if (close !== undefined) close.props.onClick()
+  await settle(80)
+}
+rpcOverrides.clear()
 
 // Rail mode: the host enlarges its controls, so ours must follow.
 document.getElementById('sidebar').classList.add('_9lTDKa_rail')

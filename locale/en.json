@@ -72,6 +72,7 @@
   "cs.createNew": "Create a new Codespace",
   "prebuild.checking": "Checking for a prebuild…",
   "prebuild.missing": "No prebuild configured — creating may be slow",
+  "prebuild.unknown": "Prebuild status could not be read — creating may take 1–3 minutes",
   "prebuild.cancel": "Cancel",
   "prebuild.proceed": "Create anyway",
   "prebuild.ok": "This repository has a prebuild configured.",

@@ -542,10 +542,25 @@ hardcoded settings nav icon. Rules:
 * **Prebuild detection is the `prebuild_availability` field on the machine object**,
   *not* on `/codespaces/new` (that endpoint carries no prebuild field):
   `GET /repos/{o}/{r}/codespaces/machines?ref=<branch>` →
-  `machines[].prebuild_availability: 'none' | 'ready' | 'in_progress' | null`.
-  `ready` ⇒ true; all `none`/`null` ⇒ false; `in_progress`, empty list, or any failure
-  ⇒ `null` (unknown), which must take the same branch as "no prebuild" and show the
-  slow-creation notice.
+  `machines[].prebuild_availability: 'ready' | null`.
+  `ready` ⇒ true, `null` ⇒ false (no prebuild), and a failed call or an empty
+  machine list ⇒ `null` (unknown), which is a THIRD state and must not be rendered
+  as "no prebuild" — see below.
+  * MEASURED, correcting an earlier guess: only `"ready"` and `null` were ever
+    observed. A sweep of 15 repositories (23 machine rows, including repos with
+    known prebuilds such as `microsoft/vscode` and `python/cpython`) returned
+    `null` x23 and `"ready"` x3 — **never** `'none'` and **never**
+    `'in_progress'`. So a readable-but-null field genuinely means "no prebuild",
+    and `false` is an earned answer; only a failed read is "unknown".
+  * There is **no public prebuild endpoint**: `repos/{r}/codespaces/prebuilds`,
+    `repos/{r}/prebuilds`, `repos/{r}/codespaces/prebuilds/{branch}` and
+    `user/codespaces/prebuilds` all answer 404, and GitHub's GraphQL schema has no
+    Codespaces types at all (checked by introspection). The machine list is the
+    only signal a third-party tool has.
+  * The client therefore keeps a **tri-state** (`true | false | null`) all the way
+    to the notice, rather than collapsing `null` into `false`. Reporting the
+    plugin's own read failure as "未配置预构建" states a fact about the user's
+    repository that was never established.
 * Machines: `{ name, display_name, operating_system, cpus, memory_in_bytes,
   storage_in_bytes, prebuild_availability }`. Smallest = fewest `cpus`, then least
   `memory_in_bytes`, then least `storage_in_bytes`.
