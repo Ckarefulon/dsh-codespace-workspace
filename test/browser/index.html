@@ -22,8 +22,16 @@
   }
   /* The host's real metrics, copied from dsh-client-ui-workspace so the
      reveal/hide mechanics behave exactly as in the app. The hash prefix is
-     per-build; these are the shipped values. */
-  .hIlkoa_folder { display: none; }
+     per-build; these are the shipped values.
+
+     NOTE the folder/chevron swap: the folder is VISIBLE at rest and only steps
+     aside on hover. An earlier revision of this fixture carried a bare
+     `.hIlkoa_folder { display: none; }` rule that exists nowhere in the host — it
+     made "there is no visible folder icon to replace" look true, and so let a
+     marker that was ADDED beside the folder pass every assertion. The host's real
+     rules are the three below. */
+  .hIlkoa_projectRow .hIlkoa_chevron { display: none; }
+  .hIlkoa_projectRow:hover .hIlkoa_chevron { display: inline-flex; }
   .hIlkoa_projectRow:hover .hIlkoa_folder { display: none; }
   .hIlkoa_rowActions { flex: none; align-items: center; gap: 10px; display: none; }
   .hIlkoa_projectRow:hover .hIlkoa_rowActions,

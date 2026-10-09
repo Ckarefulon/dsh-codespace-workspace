@@ -601,6 +601,24 @@ function overlayText() {
   }
 }
 
+// The window's close control is an icon, not the `✕` text glyph it used to be.
+{
+  const close = overlayHandle.search((v) => v.type === 'button' && v.props?.['aria-label'] === '关闭')[0]
+  check(close !== undefined, 'the window has a close button')
+  // `Icon` is a component, so its `<svg>` lives in its own frame and is found by
+  // searching host vnodes rather than by reading the button's children.
+  const svgs = overlayHandle.search((v) => v.type === 'svg')
+  const closeSvg = svgs.find((svg) => (svg.children ?? []).some((p) => p?.props?.d === 'M2.5 2.5L13.5 13.5'))
+  check(closeSvg !== undefined, 'the close button renders a DSH svg, not a text glyph')
+  eq('  -> with the host’s IconCloseOutline artwork, verbatim',
+    (closeSvg?.children ?? []).map((p) => p?.props?.d).join('|'),
+    'M2.5 2.5L13.5 13.5|M13.5 2.5L2.5 13.5')
+  eq('  -> 16px box', closeSvg?.props?.width, 16)
+  eq('  -> Regular weight, on the svg', closeSvg?.props?.strokeWidth, '1')
+  eq('  -> no text glyph anywhere in the window head',
+    /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{2715}\u{2716}]/u.test(overlayText()), false)
+}
+
 // Leave a mounted overlay with the window closed, for the sections below.
 {
   const close = overlayHandle.search((v) => v.type === 'button' && v.props?.['aria-label'] === '关闭')[0]
@@ -637,8 +655,45 @@ check(!sessionRow.hasAttribute('data-dsh-codespace-row'), 'the session row is NO
 
 const icon = row.querySelector('[data-dsh-codespace-icon]')
 check(icon !== null, 'the cloud marker was injected')
-check(icon !== null && row.firstElementChild === icon, 'the cloud marker is the row’s first child')
 check(icon !== null && icon.querySelector('svg') !== null, 'the cloud marker holds an inline svg')
+
+// The marker REPLACES the folder glyph, in the folder's own slot.
+const folder = row.querySelector('[class*="_folder"]')
+check(folder !== null && folder.querySelector('[data-dsh-codespace-icon]') === icon,
+  'the cloud marker sits INSIDE the host folder slot (replacing it, not added beside it)')
+check(row.children[0] === folder,
+  '  -> and the folder slot is still the row’s first child, so the cloud is in its position')
+const hostFolderSvg = folder?.querySelector('svg:not([data-dsh-codespace-icon] svg)')
+check(hostFolderSvg !== null && hostFolderSvg.getAttribute('data-dsh-codespace-hidden') !== null,
+  'the host folder glyph is hidden, and flagged as ours-to-restore')
+check(hostFolderSvg !== null && getComputedStyle(hostFolderSvg).display === 'none',
+  '  -> the host folder glyph really is display:none')
+check(icon !== null && getComputedStyle(icon).display !== 'none',
+  '  -> while the cloud itself is visible')
+eq('the folder slot holds exactly [host svg, our cloud]', folder?.children.length, 2)
+// The decisive negative: one glyph, not two. If the cloud were merely ADDED,
+// the row would show the folder AND the cloud at rest.
+eq('exactly one glyph is visible in the resting row',
+  [hostFolderSvg, icon].filter((el) => el !== null && getComputedStyle(el).display !== 'none').length, 1)
+
+// "Same standing as the folder" is a behaviour, not just a position: the host
+// hides the WHOLE folder slot on hover so the chevron can take its place. Because
+// the cloud lives inside that slot, it inherits the swap for free — which is the
+// reason to nest it there rather than to re-implement the rule.
+{
+  const selectors = []
+  for (const sheet of Array.from(document.styleSheets)) {
+    let list = null
+    try { list = sheet.cssRules } catch { list = null }
+    for (const rule of Array.from(list ?? [])) if (rule.selectorText !== undefined) selectors.push(rule.selectorText)
+  }
+  const hideRule = selectors.find((s) => s.includes(':hover') && s.trim().endsWith('.hIlkoa_folder'))
+  check(hideRule !== undefined, 'the host still hides the folder slot on hover')
+  check(folder !== null && folder.matches('.hIlkoa_slot.hIlkoa_folder'),
+    '  -> and the span holding the cloud is exactly the slot that rule targets')
+  check(getComputedStyle(folder).display !== 'none',
+    '  -> so the cloud is shown while resting and steps aside on hover, like the folder did')
+}
 
 // The host's own nodes must all survive: React owns them and would throw on unmount.
 check(row.querySelector('[class*="_folder"]') !== null, 'the host folder span was NOT removed')
@@ -659,9 +714,83 @@ check(actions.children[2]?.getAttribute('aria-label') === 'New session',
 
 section('button states')
 
+/**
+ * The four artworks, copied INDEPENDENTLY from
+ * `@deepseek-ai/dsh-client-ui-primitives` (not imported from the code under
+ * test). Written out again on purpose: if the module's own copy drifts from the
+ * host's artwork, these assertions are what notices.
+ */
+const ICON_STOP = {
+  viewBox: '0 0 16 16',
+  paths: [
+    'M8 14.5C11.5899 14.5 14.5 11.5899 14.5 8C14.5 4.41015 11.5899 1.5 8 1.5C4.41015 1.5 1.5 4.41015 1.5 8C1.5 11.5899 4.41015 14.5 8 14.5Z',
+    'M6.5 5V11',
+    'M9.5 5V11',
+  ],
+}
+const ICON_COUNTDOWN = {
+  viewBox: '0 0 17 17',
+  paths: [
+    'M4.09372 11.9895L3.11865 14.0387',
+    'M12.1392 11.9895L13.1143 14.0387',
+    'M8.11646 4.78442V8.03442L10.6165 9.53442',
+    'M8.11646 13.4094C11.154 13.4094 13.6165 10.947 13.6165 7.90942C13.6165 4.87186 11.154 2.40942 8.11646 2.40942C5.07889 2.40942 2.61646 4.87186 2.61646 7.90942C2.61646 10.947 5.07889 13.4094 8.11646 13.4094Z',
+    'M1.75952 4.74323C2.30657 3.65639 3.12646 2.73047 4.12926 2.05542',
+    'M14.3345 4.74323C13.7874 3.65639 12.9675 2.73047 11.9647 2.05542',
+  ],
+}
+const ICON_ERROR = {
+  viewBox: '0 0 16 16',
+  paths: [
+    'M6.87 2.6a1.33 1.33 0 0 1 2.26 0l5.34 9.33A1.33 1.33 0 0 1 13.33 14H2.67a1.33 1.33 0 0 1-1.14-2.07Z',
+    'M8 6v3m0 2.33h.01',
+  ],
+}
+const ICON_START = {
+  viewBox: '0 0 16 16',
+  paths: [
+    'M8 14.5C11.5899 14.5 14.5 11.5899 14.5 8C14.5 4.41015 11.5899 1.5 8 1.5C4.41015 1.5 1.5 4.41015 1.5 8C1.5 11.5899 4.41015 14.5 8 14.5Z',
+    'M10.3329 7.91346C10.3996 7.95195 10.3996 8.04818 10.3329 8.08667L6.78304 10.1362C6.71638 10.1747 6.63304 10.1266 6.63304 10.0496L6.63304 5.95055C6.63304 5.87357 6.71638 5.82546 6.78304 5.86395L10.3329 7.91346Z',
+  ],
+}
+
+/**
+ * The glyph's own `d` attributes, joined.
+ *
+ * The glyph used to be an emoji and these assertions used to compare its text
+ * content. They now read the artwork instead, which is the point: an emoji is a
+ * platform font's colour glyph, not something drawn to the host's icon spec.
+ */
 function glyph() {
   const span = button.querySelector('[data-dsh-codespace-glyph]')
-  return span === null ? null : span.textContent
+  if (span === null) return null
+  return Array.from(span.querySelectorAll('path')).map((p) => p.getAttribute('d')).join('|')
+}
+
+/**
+ * Assert the button is showing a hand-drawn DSH-spec icon for `kind`.
+ *
+ * Checks the whole spec, not just "an svg exists": the box size, the `Regular`
+ * stroke weight ON THE `<svg>` (never on a path), `fill="none"`, the
+ * `currentColor` stroke, and the artwork's own `viewBox`.
+ */
+function checkIcon(label, kind, expected) {
+  const span = button.querySelector('[data-dsh-codespace-glyph]')
+  const svg = span === null ? null : span.querySelector('svg')
+  check(svg !== null, label + ': the glyph is an inline svg, not a text glyph')
+  if (svg === null) return
+  eq('  -> svg width', svg.getAttribute('width'), '16')
+  eq('  -> svg height', svg.getAttribute('height'), '16')
+  eq('  -> viewBox (the artwork’s own grid)', svg.getAttribute('viewBox'), expected.viewBox)
+  eq('  -> fill', svg.getAttribute('fill'), 'none')
+  eq('  -> stroke-width, on the svg as the host does', svg.getAttribute('stroke-width'), '1')
+  eq('  -> artwork matches the host icon for "' + kind + '"', glyph(), expected.paths.join('|'))
+  const paths = Array.from(svg.querySelectorAll('path'))
+  eq('  -> every path strokes currentColor, like the host’s icons',
+    paths.every((p) => p.getAttribute('stroke') === 'currentColor'), true)
+  eq('  -> and none of them carries its own stroke-width',
+    paths.some((p) => p.hasAttribute('stroke-width')), false)
+  eq('  -> no text glyph leaked in', /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(span.textContent), false)
 }
 
 /** Wait until the row's button has adopted a given glyph kind. */
@@ -672,7 +801,7 @@ const untilGlyph = (kind) => until(
 const tooltipTextOf = tooltipFor
 
 // stopped
-eq('stopped → ▶️', glyph(), '▶️')
+checkIcon('stopped', 'start', ICON_START)
 eq('stopped → tooltip', await tooltipTextOf(button), '启动 Codespace')
 eq('stopped → aria-label', button.getAttribute('aria-label'), '启动 Codespace')
 eq('stopped → not disabled', button.disabled, false)
@@ -680,13 +809,13 @@ eq('stopped → not disabled', button.disabled, false)
 // running
 record = { ...record, codespace: { ...record.codespace, state: 'Available' } }
 await untilGlyph('stop')
-eq('running → ⏸️', glyph(), '⏸️')
+checkIcon('running', 'stop', ICON_STOP)
 eq('running → tooltip', await tooltipTextOf(button), '暂停 Codespace')
 
 // counting down
 record = { ...record, autoPauseRemainingMs: 25 * 60 * 1000 }
 await untilGlyph('countdown')
-eq('counting down → 🕐', glyph(), '🕐')
+checkIcon('counting down', 'countdown', ICON_COUNTDOWN)
 eq('counting down → tooltip carries the minutes', await tooltipTextOf(button), '还剩 25 分钟自动暂停')
 
 // starting: spinner, disabled
@@ -700,7 +829,7 @@ eq('starting → tooltip', await tooltipTextOf(button), '正在切换状态…')
 // error
 record = { ...record, codespace: { ...record.codespace, state: 'Failed' } }
 await untilGlyph('error')
-eq('error → ⚠️', glyph(), '⚠️')
+checkIcon('error', 'error', ICON_ERROR)
 eq('error → tooltip names the state', await tooltipTextOf(button), '状态异常：Failed')
 
 /* ---- the click protocol ---- */
@@ -897,6 +1026,15 @@ check(document.querySelector('[data-dsh-codespace-icon]') === null, 'the cloud m
 check(document.querySelector('[data-dsh-codespace-action]') === null, 'the action button was removed')
 check(document.querySelector('[data-dsh-codespace-launcher]') === null, 'the header launcher was removed')
 check(document.querySelector('[data-dsh-codespace-header]') === null, 'the header marker was removed')
+// Restoring the host glyph is the half that is easy to forget: without it the
+// row would come back with an invisible folder — a broken row, not a clean one.
+check(document.querySelector('[data-dsh-codespace-hidden]') === null,
+  'no host node is left flagged as hidden')
+const restoredSvg = document.querySelector('[data-row-key="workspace:' + WORKSPACE + '"] [class*="_folder"] svg')
+check(restoredSvg !== null && getComputedStyle(restoredSvg).display !== 'none',
+  'the host folder glyph is visible again after dispose')
+eq('  -> and its style attribute was cleaned up, not left as display:none',
+  restoredSvg?.getAttribute('style') ?? null, null)
 eq('the icon row is back to the host’s two controls',
   document.querySelector('[class*="_headerActions"]').children.length, 2)
 check(document.querySelector('[class*="_headerActions"]').lastElementChild.getAttribute('aria-label') === '添加工作区',

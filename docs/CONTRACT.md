@@ -329,6 +329,20 @@ where the requirement places it. It is therefore a DOM augmentation instead.
   `Regular` = 1, `Medium` = `ICON_MEDIUM_STROKE` = 1.3; the header uses `Regular`.
   The plugin's cloud path lives in one shared constant so the React and DOM
   renderers cannot drift, and the browser suite asserts the weight.
+* **Every icon we draw is copied verbatim from the host's own artwork; never use
+  an emoji or a text glyph.** An emoji is a colour glyph from a platform font at
+  its own optical weight, so it ignores `currentColor` and the theme, and renders
+  differently per OS — next to the host's `Icon*OutlineRegular` controls it reads
+  as a different kind of object. The row button's four states are
+  `IconPauseOutlineRegular` / `IconAlarmClockOutlineRegular` /
+  `IconWarningTriangleOutlineRegular` / `IconPlayOutlineRegular`, and the window's
+  close control is `IconCloseOutlineRegular`; one constructor (`iconNode`, plus its
+  React twin `Icon`) carries the shared spec. Each entry keeps **its own**
+  `viewBox` and line caps: the alarm clock is drawn on a **17x17** grid, not 16,
+  and the warning triangle needs round caps and joins. Do not normalise those away.
+  The browser suite compares each glyph's `d` data against a copy written out
+  independently, so drift from the host's artwork is a test failure, and it also
+  scans rendered text for emoji codepoints so a text glyph cannot creep back in.
 * **The launcher glyph is a cloud PLUS the add mark**, echoing the host's own
   `IconProjectAddOutlineRegular` (folder + plus) on the button beside it. The plus
   strokes are copied verbatim from that artwork.
@@ -414,10 +428,28 @@ hardcoded settings nav icon. Rules:
 
 * Never remove or replace a React-owned node; that causes `NotFoundError` on
   unmount. Hide with CSS and inject our own element, or rewrite only text.
+* **To take over the folder slot, hide the host's glyph with an inline
+  `display:none` and nest our own inside the host's `span.slot.folder`** — do not
+  add a sibling next to it. Read the slot with
+  `span[class*="_slot"][class*="_folder"]`; the suffix is matched, never the
+  hashed prefix.
+  Two things this depends on, both measured:
+  * The folder is **visible at rest**. The host's rules are
+    `.hIlkoa_projectRow .hIlkoa_chevron{display:none}`,
+    `…:hover .hIlkoa_chevron{display:inline-flex}` and
+    `…:hover .hIlkoa_folder{display:none}` — the `:hover` one is easy to misread
+    as an unconditional `display:none`, which is what an earlier revision did
+    (and the fixture had copied that same wrong rule, so it tested nothing).
+    Nesting inherits both the resting visibility and the hover swap for free.
+  * The folder swaps `IconFolderClose`/`IconFolderOpen` on expand, so React
+    replaces that child. Re-hide on every `sync()`, and skip our own node in that
+    loop — it is a child of the slot too.
 * One `MutationObserver` on the sidebar container, coalesced through a
   microtask/rAF queue. Never observe inside our own mutation without a guard.
 * Tag everything with `data-dsh-codespace-*` attributes so we can find and undo
-  it. Remove every node, attribute, style and observer on dispose.
+  it. Remove every node, attribute, style and observer on dispose — **including
+  restoring the `style` of any host node we hid**, otherwise the row comes back
+  with an invisible folder instead of a clean one.
 * Read the row identity from `data-row-key`, then map it to a workspace id via
   our own host query — do not scrape titles as identity.
 

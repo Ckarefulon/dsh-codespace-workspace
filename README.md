@@ -38,16 +38,18 @@ SSH 主机列表里塞任何东西，因此不会和其他云工作区插件冲�
 
 - 新建云端工作区的按钮放在**工作区分组标题栏的图标行里**，与 DSH 原有的图标
   同地位，紧挨在「添加工作区」的**左边**——不是另做一个独立控件。
-- 云端工作区使用**云朵图标**，固定不变，不随 Codespace 状态变化。
+- 云端工作区**沿用原工作区的文件夹图标位置**，把那里的文件夹字形换成**云朵**：位置、
+  尺寸、颜色，以及悬停时「让位给展开箭头」的行为都和原来一致，行首始终只有一个图标。
+  云朵固定不变，不随 Codespace 状态变化。
 - 操作按钮位于**倒数第三个**——在三个点菜单和新建对话按钮之前。
 - 显示逻辑跟随宿主默认行为：不 hover 时隐藏；打开「始终显示」后常显。
-- 按钮状态：
+- 按钮状态（四个图标都是**照着宿主图标手绘的 SVG**，不是 emoji）：
 
 | 状态 | 图标 | 悬停提示 | 点击 |
 |---|---|---|---|
-| 已停止 | ▶️ | 启动 Codespace | 启动 |
-| 运行中 | ⏸️ | 暂停 Codespace | 暂停 |
-| 倒计时中 | 🕐 | 还剩 X 分钟自动暂停 | 取消倒计时 |
+| 已停止 | 播放 | 启动 Codespace | 启动 |
+| 运行中 | 暂停 | 暂停 Codespace | 暂停 |
+| 倒计时中 | 闹钟 | 还剩 X 分钟自动暂停 | 取消倒计时 |
 | 启动/暂停中 | 转圈 | — | 不可点 |
 
 **双击时钟图标 = 立即暂停。**
@@ -205,7 +207,7 @@ node test/e2e.mjs                  # 全通过（找不到已安装的 Harness �
 
 # 浏览器侧：在真实 DOM 里跑真实 bundle，对着宿主 markup/CSS 的忠实副本
 node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
-                                   # 147 项，全通过
+                                   # 201 项，全通过
 
 # 联网：用 gh 的令牌打真实 GitHub API（无令牌时自动 SKIP）
 node test/live.mjs
@@ -442,8 +444,8 @@ setPrebuild(data.hasPrebuild === true ? true : false)   // null 被压成 false
   渲染落到「该仓库已配置预构建。」那一支 —— 恰好说了与刚刚相反的话。现在确认后不再显示
   任何提示，而不是显示一句假的。
 
-浏览器套件 136 → **147 项**，其中 8 项专测这三态（含「`null` 绝不能说成未配置」和
-「确认后绝不能说成已配置」两条否定断言）。
+浏览器套件 136 → **147 项**（后续又涨到 201，见下文「十一」），其中 8 项专测这三态（含
+「`null` 绝不能说成未配置」和「确认后绝不能说成已配置」两条否定断言）。
 
 **十、云端会话里本地工具根本没让位 —— 提示词说远程，手上还是本地**
 
@@ -502,19 +504,104 @@ FAIL   -> and the local tools are hidden
 这正是它值得存在的理由：一个「静默空操作」的 bug，只有故意让它失败一次，才能证明测试
 真的看得见它。
 
+**十一、行首多了一个图标，状态图标用的是 emoji**
+
+两处都是「看起来能用，但和旁边的东西不是一类」的问题。
+
+**（一）云朵被加在文件夹**旁边**，而不是**替换**它**
+
+需求写的是「替换原来工作区的文件夹图标，样式等相同」，我做成了「在行首再插一个云朵」，
+于是行首出现两个图标。
+
+根因不是手滑，是**读错了宿主的 CSS**。`Rows` 模块里三条相关规则是：
+
+```css
+.hIlkoa_projectRow .hIlkoa_chevron{display:none}            /* 平时：箭头藏起来 */
+.hIlkoa_projectRow:hover .hIlkoa_chevron{display:inline-flex}
+.hIlkoa_projectRow:hover .hIlkoa_folder{display:none}       /* 悬停时才轮到文件夹让位 */
+```
+
+我当时只看到最后一条，就把它当成了「文件夹在两种状态下都不可见」，于是得出「没有可见的
+文件夹可替换」的结论，选择另加一个。**实际上文件夹在平时是看得见的**，它是行的第一个
+子元素，悬停时才让位给展开箭头。
+
+更糟的是，这个错误结论被**夹具固化**了：`test/browser/index.html` 里写着一条
+
+```css
+.hIlkoa_folder { display: none; }      /* ← 宿主里根本没有这条规则 */
+```
+
+于是「文件夹本来就看不见」在测试里成了前提，所有断言都是绿的。这和上文「四」里把
+16×16 当成 28×28 是同一类失误：**夹具抄了一个错的模型，测试就成了 bug 的帮凶**。
+
+现在改成把云朵塞进宿主那个 `span.slot.folder`，并用内联 `display:none` 藏掉宿主自己的
+svg（原 `style` 值连同标记一起存下，撤销时还原）。好处是位置、尺寸、颜色、以及「悬停让位
+给箭头」全部**从宿主 CSS 继承**，我一行都不用复刻。夹具里的伪规则已按真实 CSS 修正。
+
+补充一个实现细节：文件夹在展开/折叠时会换 svg（`IconFolderClose` ↔ `IconFolderOpen`），
+React 会把节点换掉，所以每次 `sync()` 都要重新藏一遍「现在这个」；循环里要跳过我自己那个
+节点——它也是子元素，第一版没跳过，第二次 `sync()` 就会把云朵自己藏起来。
+
+**（二）状态图标是 emoji**
+
+四个状态原本用 `⏸️`/`🕐`/`⚠️`/`▶️`。问题是 emoji 是**平台字体的彩色字形**，有自己的
+光学尺寸和粗细，它和旁边两个控件（`Menu` 的三点、`IconNewChatOutline` 的新建对话）——都是
+16px、1px `currentColor` 描边、跟随主题色的 `Icon*OutlineRegular`——放在一起，就是一个
+更重、全彩、且每个系统渲染都不同的方块。它连主题色都不跟随。
+
+现在四个图标都**照抄宿主自己的 artwork**（path 逐字复制，只挑用哪个字形）：
+
+| 状态 | 抄自 |
+|---|---|
+| 暂停/停止 | `IconPauseOutlineRegular` |
+| 倒计时 | `IconAlarmClockOutlineRegular` |
+| 异常 | `IconWarningTriangleOutlineRegular` |
+| 启动 | `IconPlayOutlineRegular` |
+
+抽了一个 `iconNode(spec)` 承载公共规范（16px 盒子、`Regular` 权重 = 1 **写在 `<svg>` 上**、
+`fill="none"` + `stroke="currentColor"`），但每个字形保留**它自己的** `viewBox` 和线帽设置
+——闹钟就是画在 **17×17** 网格上的，warning 三角形要用圆角线帽，这些都不能被"统一"掉。
+
+顺带把**多步窗口右上角的关闭按钮**也一起改了：那里的 `✕` 是同一类问题——用文本字符
+当图标。现在换成宿主自己的 `IconCloseOutlineRegular`（两条对角线，逐字照抄）。全库扫过
+一遍，`lib/client.js` 里已经**没有任何 emoji 当图标**，只剩两条注释在举例说明旧实现。
+
+浏览器套件 147 → **201 项**。新增的不只是数数，而是**能抓到这两类错误**的断言：
+
+- 云朵必须在 folder 槽**里面**，且 folder 槽仍是行首第一个子元素；
+- 宿主的 svg 真的 `display:none`，云朵真的可见；
+- **静止状态下整个行只有 1 个图标可见**——这条否定了「加一个在旁边」；
+- 承载云朵的 span 正是宿主 `:hover ._folder{display:none}` 规则所命中的那个（悬停行为等价）；
+- 每个字形逐条比对 `viewBox` / `stroke-width` 在 svg 上 / 每个 path 都是 `currentColor`
+  且**都不带** `stroke-width`，外加一条「glyph 文本里不得含 emoji 码点」；
+- 关闭按钮是 svg 而不是文本，artwork 与 `IconCloseOutlineRegular` 逐字一致，且整个窗口
+  标题区**不得出现任何 emoji 码点**。
+
+两类错误都反向验证过牙齿。把「替换」退回「在行首另加一个」，**6 项变红**，其中最关键的是
+
+```
+FAIL exactly one glyph is visible in the resting row — got 2, want 1
+```
+
+把关闭按钮退回 `'✕'`，**5 项变红**，最后一条正是那条 emoji 扫描。
+
 ## 已知限制
 
 - **工作区分组标题栏的图标行、以及工作区行，都没有官方插槽**。DSH 把「添加工作区」
   按钮和 `ProjectRowItem` 的操作按钮、文件夹图标全部写死，因此以下四处通过 DOM 增强
-  实现（与 `dsh-pet` 处理设置导航图标同一手法）：标题栏里的新建按钮、行首云朵图标、
-  行内启停按钮、hover 文案（外加菜单里的「删除 Codespace…」）。做法是只注入、不删除
-  React 拥有的节点，全部打上 `data-dsh-codespace-*` 标记，一个合并的
-  `MutationObserver`，dispose 时完整撤销。宿主改版可能影响它。已核对：客户端运行时的
+  实现（与 `dsh-pet` 处理设置导航图标同一手法）：标题栏里的新建按钮、行首云朵、
+  行内启停按钮、hover 文案（外加菜单里的「删除 Codespace…」）。做法是全部打上
+  `data-dsh-codespace-*` 标记、一个合并的 `MutationObserver`、dispose 时完整撤销，
+  并且**不删除任何 React 拥有的节点**：行首的云朵是把自己塞进宿主那个文件夹
+  `span.slot` 里，再把宿主自己的 svg 用内联 `display:none` 藏起来（连同原 `style`
+  一起登记，撤销时还原）。这样位置、尺寸、颜色和悬停让位全都从宿主的 CSS 继承，
+  不需要我自己复刻。宿主改版可能影响它。已核对：客户端运行时的
   插槽目录共 90 个，其中有 `sidebar.workspaces.session.menu.item`，但**没有**工作区行
   的菜单插槽，也没有标题栏图标行的插槽；`sidebar.footer.action` 是真实存在的插槽，
   但它把控件放在侧边栏底部，不符合「与原有三个图标同地位、紧挨添加工作区左侧」的要求。
   标题栏的 `_sectionHeader` / `_headerActions` 两个类名后缀经核对为
-  `dsh-client-ui-workspace` 独有，不会误匹配。
+  `dsh-client-ui-workspace` 独有，不会误匹配；行首文件夹槽位按 `_folder` 后缀匹配，
+  并限定在 `span[class*="_slot"]` 上，避免误伤同模块的 `_folderActive`。
 - 标题栏图标行是 `justify-content:flex-end` + `max-width:60px`，而标题栏的控件是
   **28×28**（`_9lTDKa_iconButton`），所以 60px 正好放**两个**（28+4+28）。加进第三个
   控件需要放宽容器宽度，放宽规则带了 `:not([class*="_headerActionsHidden"])`，以免盖掉
