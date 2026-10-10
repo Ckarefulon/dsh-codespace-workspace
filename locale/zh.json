@@ -104,6 +104,7 @@
   "success.openFailed": "侧边栏里还没有这一行，请展开侧边栏后点击该工作区右侧的「新建会话」。",
   "success.done": "完成",
   "row.cloud": "云端 Codespace 工作区",
+  "row.hoverRepo": "{repo} · {name}",
   "row.start": "启动 Codespace",
   "row.stop": "暂停 Codespace",
   "row.countdown": "还剩 {n} 分钟自动暂停",

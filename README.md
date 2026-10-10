@@ -54,7 +54,9 @@ SSH 主机列表里塞任何东西，因此不会和其他云工作区插件冲�
 
 **双击时钟图标 = 立即暂停。**
 
-工作区 hover 卡片中的「工作区位置」一行改为显示 **Codespace 的名字**。
+工作区行的标题用**仓库短名**（`owner/name` 里的 `name`）——Codespace 自己的名字是机器生成的
+（`psychic-goggles-7v9974jwpwr5fpqxq`），看不出是哪个项目。标题装不下的两件事放在 hover
+卡片里：那一行「工作区位置」显示 **`owner/name · Codespace 名字`**。
 
 ### 新建云端工作区
 
@@ -196,7 +198,7 @@ test/
 
 ```bash
 # Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
-node test/check.mjs                # 122 项，全通过
+node test/check.mjs                # 147 项，全通过
 
 # 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
 node test/shutdown.mjs             # 31 项，全通过
@@ -207,7 +209,7 @@ node test/e2e.mjs                  # 全通过（找不到已安装的 Harness �
 
 # 浏览器侧：在真实 DOM 里跑真实 bundle，对着宿主 markup/CSS 的忠实副本
 node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
-                                   # 201 项，全通过
+                                   # 203 项，全通过
 
 # 联网：用 gh 的令牌打真实 GitHub API（无令牌时自动 SKIP）
 node test/live.mjs
@@ -567,7 +569,6 @@ React 会把节点换掉，所以每次 `sync()` 都要重新藏一遍「现在�
 一遍，`lib/client.js` 里已经**没有任何 emoji 当图标**，只剩两条注释在举例说明旧实现。
 
 浏览器套件 147 → **201 项**。新增的不只是数数，而是**能抓到这两类错误**的断言：
-
 - 云朵必须在 folder 槽**里面**，且 folder 槽仍是行首第一个子元素；
 - 宿主的 svg 真的 `display:none`，云朵真的可见；
 - **静止状态下整个行只有 1 个图标可见**——这条否定了「加一个在旁边」；
@@ -584,6 +585,44 @@ FAIL exactly one glyph is visible in the resting row — got 2, want 1
 ```
 
 把关闭按钮退回 `'✕'`，**5 项变红**，最后一条正是那条 emoji 扫描。
+
+**十二、`icon.svg` 没打进安装包，以及工作区名是一串乱码**
+
+**（一）`Plugin metadata ... ENOENT ... icon.svg`**
+
+`package.json` 里有 `"icon": "./icon.svg"`，仓库里也**确实有**这个文件（第一个提交就在），
+但 `files` 白名单里**漏了它**。`files` 是 npm/pnpm 的打包白名单，而这个 profile 是从 GitHub
+tarball 装的（`github:Ckarefulon/dsh-codespace-workspace`）—— 打包时按白名单过滤，`icon.svg`
+就被丢掉了。DSH 读插件元信息时按 `icon` 字段去找它，`lstat` 失败。
+
+关键在于**仓库看起来是好的，只有打包后的副本是坏的**：本地 `git status` 干净、文件就在
+根目录，所以怎么读源码都发现不了。这也是为什么现在加了一条自检：把 `main`、`icon`、
+每个 `exports` 目标、以及 `dsh.bundle.patch` 都拿去和 `files` 白名单比对，缺一个就红。
+`package.json` 本身豁免（npm 无论如何都会打它）。
+
+**（二）工作区名是 `psychic-goggles-7v9974jwpwr5fpqxq`**
+
+那是 Codespace 自己的名字，GitHub 机器生成的，看不出是哪个项目。现在行标题取**仓库短名**
+（`owner/name` 里的 `name`），标题装不下的两件事放进 hover 卡片那一行：
+**`owner/name · Codespace 名字`**。
+
+三处要一起改，否则会出现「新行对、老行还是乱码」或者「有 locale 服务时对、没有时显示原始
+key」：
+
+- `titleForCodespace()`（host 侧）决定新行的标题；
+- `listWorkspaces()` 里加了一步**回填**，把已登记记录改成新标题 —— DSH 的 registry 会
+  **保留已存在记录的标题**，不回填的话你现有的那一行永远还是旧名字；
+- 客户端 `hoverLocationOf()` 拼 hover 那行。
+
+这里还踩到一个自己造的坑：`lib/client.js` 里**另有一份内联的 zh/en 字典**（没有 `locale`
+服务时用它，浏览器 harness 就是这种情况）。我只改了 `locale/*.json`，于是浏览器套件里那行
+直接显示成了字面量 `row.hoverRepo`。原来的 locale 自检只比对「两个 JSON 文件之间」和
+「JSON 与 `t()` 调用之间」，**从没比对过内联字典**——现在补上了，两边键集合必须一致
+（`nav` 豁免，那是宿主读的）。
+
+`check` 122 → **147 项**（含 10 项 `titleForCodespace`、11 项打包白名单、2 项内联字典），
+浏览器套件 201 → **203 项**。两处都反向验证过牙齿：把 `icon.svg` 从白名单里删掉 → 1 项变红；
+把 hover 那行退回只显示标签 → 1 项变红（`got "my-box", want "Ckarefulon/app.ckarefulon.main · my-box"`）。
 
 ## 已知限制
 

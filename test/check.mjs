@@ -104,6 +104,42 @@ check(pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-workspace'),
   'ui-workspace IS injected (it owns the section header we augment)')
 check(pkg.dsh?.engines?.dsh !== undefined, 'dsh.engines.dsh is declared')
 
+// Every file the manifest POINTS AT must survive packaging.
+//
+// `files` is the npm/pnpm pack whitelist, and the profile installs this package
+// from a GitHub tarball — which applies that whitelist. `icon.svg` was missing
+// from it while `"icon": "./icon.svg"` still pointed at it, so the installed copy
+// had no icon and DSH reported
+// `ENOENT ... lstat '.../dsh-codespace-workspace/icon.svg'` when reading plugin
+// metadata. The repo looked fine; only the packed copy was broken.
+{
+  const listed = Array.isArray(pkg.files) ? pkg.files : []
+  check(listed.length > 0, 'the manifest declares a files whitelist')
+  // `files` entries are paths relative to the package root; npm treats a bare
+  // name as "this file or this directory". Compare the leading segment.
+  const covered = (relative) => listed.some((entry) => {
+    const clean = String(entry).replace(/^\.\//, '').replace(/\/+$/, '')
+    return relative === clean || relative.startsWith(clean + '/')
+  })
+  for (const field of ['main', 'icon']) {
+    const value = pkg[field]
+    if (typeof value !== 'string') continue
+    const relative = value.replace(/^\.\//, '')
+    check(existsSync(join(root, relative)), `${field} -> ${value} exists in the repo`)
+    check(covered(relative), `  -> and "${relative}" is covered by files (else it is absent after packing)`)
+  }
+  for (const value of Object.values(pkg.exports ?? {})) {
+    if (typeof value !== 'string') continue
+    const relative = value.replace(/^\.\//, '')
+    // `package.json` is always packed regardless of `files`, so it needs no entry.
+    if (relative === 'package.json') continue
+    check(covered(relative), `exports target "${relative}" is covered by files`)
+  }
+  // `dsh.bundle.patch` is read by the host at load time, so it has to ship too.
+  const patchPath = typeof pkg.dsh?.bundle?.patch === 'string' ? pkg.dsh.bundle.patch.replace(/^\.\//, '') : null
+  if (patchPath !== null) check(covered(patchPath), `dsh.bundle.patch "${patchPath}" is covered by files`)
+}
+
 /* ------------------------------------------------------------------ *
  * 2. The patch row.
  * ------------------------------------------------------------------ */
@@ -530,7 +566,37 @@ if (!ensurePeers()) {
   }
 
   /* ---------------------------------------------------------------- *
-   * 6. Shell quoting.
+   * 6. Workspace naming.
+   * ---------------------------------------------------------------- */
+
+  section('workspace naming')
+
+  // The row is titled after the REPOSITORY, because a Codespace's own name is
+  // machine-generated (`psychic-goggles-7v9974jwpwr5fpqxq`) and says nothing
+  // about which project the row is.
+  const { titleForCodespace } = await load('../lib/host/codespaces.js')
+  check(typeof titleForCodespace === 'function', 'titleForCodespace is exported')
+  eq('owner/name -> the repository short name',
+    titleForCodespace({ repository: 'Ckarefulon/app.ckarefulon.main', name: 'psychic-goggles-7v9974jwpwr5fpqxq' }),
+    'app.ckarefulon.main')
+  eq('a bare name is used as-is', titleForCodespace({ repository: 'app.main', name: 'cs-1' }), 'app.main')
+  eq('the LAST slash splits it (an org path cannot be mistaken for the name)',
+    titleForCodespace({ repository: 'org/sub/name', name: 'cs-1' }), 'name')
+  eq('an unknown repository falls back to displayName, then name',
+    titleForCodespace({ repository: '', displayName: 'My Box', name: 'cs-1' }), 'My Box')
+  eq('  -> and to the Codespace name when there is no displayName',
+    titleForCodespace({ repository: '', displayName: '', name: 'cs-1' }), 'cs-1')
+  eq('the machine-generated Codespace name is never chosen over a repository',
+    titleForCodespace({ repository: 'o/r', displayName: 'o/r', name: 'cs-1' }), 'r')
+  eq('a whitespace-only repository is treated as unknown',
+    titleForCodespace({ repository: '   ', displayName: '', name: 'cs-1' }), 'cs-1')
+  eq('a repository with a trailing slash still yields a name',
+    titleForCodespace({ repository: 'owner/name/', name: 'cs-1' }), 'name')
+  eq('nothing known yields an empty string, never "undefined"', titleForCodespace({}), '')
+  eq('a non-object is handled', titleForCodespace(null), '')
+
+  /* ---------------------------------------------------------------- *
+   * 7. Shell quoting.
    * ---------------------------------------------------------------- */
 
   section('shell quoting')
@@ -625,6 +691,27 @@ const unusedKeys = zhKeys.filter((key) => {
   return true
 })
 check(unusedKeys.length === 0, 'the locale has no keys the client never reads', unusedKeys.join(', '))
+
+// The client bundle carries its OWN copy of both dictionaries, used when no
+// `locale` service is present (the browser harness runs that way). Nothing above
+// compares those two copies against `locale/*.json`, so a key added to only one
+// side ships a literal `row.hoverRepo` to the user — which is exactly what
+// happened once. Extract both inline tables and require them to match the JSON.
+{
+  const inlineTables = [...clientSource.matchAll(/MESSAGES_(ZH|EN) = \{([\s\S]*?)\n    \}/g)]
+  eq('both inline dictionaries are found in the bundle', inlineTables.length, 2)
+  for (const [, lang, body] of inlineTables) {
+    const keys = [...body.matchAll(/'([a-zA-Z0-9_.]+)':/g)].map((m) => m[1]).sort()
+    // `nav` is read by the HOST for the settings nav entry, never by the client,
+    // so the inline tables legitimately omit it.
+    const expected = (lang === 'ZH' ? zhKeys : enKeys).filter((k) => !HOST_SUPPLIED.has(k))
+    const absent = expected.filter((k) => !keys.includes(k))
+    const stray = keys.filter((k) => !expected.includes(k))
+    check(absent.length === 0 && stray.length === 0,
+      `the inline ${lang} dictionary matches locale/${lang === 'ZH' ? 'zh' : 'en'}.json`,
+      `missing inline: [${absent.join(',')}] stray inline: [${stray.join(',')}]`)
+  }
+}
 
 } finally {
   // Remove the junction WITHOUT recursing. `rmSync(..., {recursive:true})` on a

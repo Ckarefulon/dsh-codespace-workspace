@@ -100,12 +100,19 @@ const HASH = 'hIlkoa_'
 const WORKSPACE = 'ws-1'
 const CODESPACE = 'my-box'
 const PLACEHOLDER = 'C:\\Users\\Vxiao\\.dsh\\codespaces\\my-box'
+/** The repository the Codespace is built from; the row title is its short name. */
+const REPOSITORY = 'Ckarefulon/app.ckarefulon.main'
 
 let record = {
   workspaceId: WORKSPACE,
-  title: 'my-box',
+  title: 'app.ckarefulon.main',
   path: PLACEHOLDER,
-  codespace: { name: CODESPACE, displayName: 'my-box', state: 'Shutdown' },
+  codespace: {
+    name: CODESPACE,
+    displayName: 'my-box',
+    repository: REPOSITORY,
+    state: 'Shutdown',
+  },
   state: 'Shutdown',
   busy: false,
   autoPauseRemainingMs: 0,
@@ -977,9 +984,25 @@ const card = document.querySelector('#hovercard')
 card.style.display = ''
 const pathLine = card.querySelector('[class*="_hoverPath"]')
 await settle(140)
-eq('the location line now shows the Codespace name', pathLine.textContent, CODESPACE)
+// The row title is only the repository's SHORT name, so the card carries the two
+// facts the title cannot: the full `owner/name` and the Codespace's own name.
+eq('the location line shows the repository full name and the Codespace name',
+  pathLine.textContent, REPOSITORY + ' · ' + CODESPACE)
 eq('the original path is stashed for undo', pathLine.getAttribute('data-dsh-codespace-original'), PLACEHOLDER)
-eq('the title line is untouched', card.querySelector('[class*="_hoverTitle"]').textContent, 'my-box')
+eq('the title line is untouched', card.querySelector('[class*="_hoverTitle"]').textContent, 'app.ckarefulon.main')
+
+// With no repository known (a Codespace still provisioning), the line falls back
+// to the Codespace label rather than rendering an empty one. The client polls the
+// harness, so mutating `record` is what makes it re-read.
+{
+  const before = pathLine.textContent
+  record = { ...record, codespace: { ...record.codespace, repository: '' } }
+  await until(() => pathLine.textContent === 'my-box', 'the card to fall back to the Codespace label')
+  eq('an unknown repository falls back to the Codespace label', pathLine.textContent, 'my-box')
+  record = { ...record, codespace: { ...record.codespace, repository: REPOSITORY } }
+  await until(() => pathLine.textContent === before, 'the repository line to come back')
+  eq('  -> and the repository line comes back', pathLine.textContent, before)
+}
 
 /* ---- the injected menu item ---- */
 

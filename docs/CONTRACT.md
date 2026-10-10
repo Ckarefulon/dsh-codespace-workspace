@@ -82,6 +82,18 @@ Service name is **`workspaceRegistry`** (`WorkspaceRegistry extends Service`,
 * `Workspace`: getters `path`, `title`, `createdAt`, `updatedAt`, `sessionIds`;
   methods `setTitle(title)`, `attachSession(id)`, `detachSession(id)`,
   `insertSessionBefore(id, beforeId)`, `status()` (`'ok' | 'missing-dir'`).
+* **The title is a display string and the registry never re-derives it.**
+  `create` does not retitle an existing entity, so a naming change has to be
+  applied with `setTitle` on every already-registered workspace, or existing rows
+  keep the old name forever. Both halves are in `CodespaceManager`:
+  `createWorkspace` titles a new record and `listWorkspaces` → `retitleFromLive`
+  backfills existing ones.
+* **The workspace title is the Codespace's REPOSITORY short name** (`owner/name`
+  → `name`), decided by `titleForCodespace()` in `lib/host/codespaces.js`. A
+  Codespace's own name is machine-generated (`psychic-goggles-7v9974jwpwr5fpqxq`)
+  and says nothing about which project the row is. The full `owner/name` and the
+  Codespace name are surfaced in the hover card instead — see the client's
+  `hoverLocationOf()` and the `row.hoverRepo` locale key.
 * **Deletion is `await ctx.workspaceRegistry.delete(id)` → `Promise<boolean>`**
   (verified, `lib/types/index.js` ≈L217–227). It removes only the registration;
   the directory and every session log are retained. **Unknown ids are an
@@ -672,6 +684,23 @@ dsh-codespace-workspace/
 
 `lib/client.js` must be self-contained: no imports other than `react`.
 
+**Every file the manifest points at must also be listed in `files`.** The profile
+installs this package from a GitHub tarball, so `files` is a real filter and not
+just npm metadata: `"icon": "./icon.svg"` with `icon.svg` missing from the
+whitelist produced
+`Plugin metadata ... ENOENT ... lstat '.../dsh-codespace-workspace/icon.svg'` on
+a repo whose working tree was perfectly clean — only the *packed* copy was
+broken. `test/check.mjs` now cross-checks `main`, `icon`, every `exports` target
+and `dsh.bundle.patch` against `files`. (`package.json` is exempt: npm always
+packs it.)
+
+**`lib/client.js` carries its own inline copy of both locale dictionaries**, used
+when the host provides no `locale` service (the browser harness runs that way).
+Any locale change must be made in three places — `locale/zh.json`,
+`locale/en.json`, and the inline `MESSAGES_ZH`/`MESSAGES_EN` tables — or the key
+renders as a literal (`row.hoverRepo`). `test/check.mjs` asserts all three agree
+(`nav` is exempt: the host reads it, not the client).
+
 ## 6. RPC contract (frozen — both halves code against this)
 
 Transport: `POST /api/dsh-codespace-workspace/rpc`, JSON body
@@ -827,10 +856,14 @@ Owns: placeholder directory creation, the managed-workspace record, the
 auto-pause timers, and the mapping between a DSH workspace id and a Codespace.
 
 ```js
+/** The DSH workspace title for a Codespace: its repository's short name. */
+export function titleForCodespace(codespace)   // → string
+
 export class CodespaceManager {
   constructor(ctx, options)
   async status()                      // → { gh, tokenSource, configured }
-  async listWorkspaces()              // → Managed[]
+  async listWorkspaces()              // → Managed[]  (also backfills titles)
+  async retitleFromLive(byName)       // idempotent; setTitle on changed records
   async createWorkspace({ codespace, title })
   async removeWorkspace({ workspaceId, deleteCodespace })
   async start(name) / async stop(name) / async remove(name)

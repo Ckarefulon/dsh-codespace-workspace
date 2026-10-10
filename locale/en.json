@@ -104,6 +104,7 @@
   "success.openFailed": "That row is not in the sidebar yet. Expand the sidebar and use the “New session” button on the workspace row.",
   "success.done": "Done",
   "row.cloud": "Cloud Codespace workspace",
+  "row.hoverRepo": "{repo} · {name}",
   "row.start": "Start Codespace",
   "row.stop": "Pause Codespace",
   "row.countdown": "Auto-pause in {n} min",
