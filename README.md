@@ -202,7 +202,7 @@ test/
 
 ```bash
 # Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
-node test/check.mjs                # 147 项，全通过
+node test/check.mjs                # 148 项，全通过
 
 # 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
 node test/shutdown.mjs             # 31 项，全通过
@@ -670,6 +670,48 @@ key」：
   核实的（`runProfile` 的 `dispose` → `fiber.dispose()` → cordis `_unload` 并发
   await 每个 disposer），不是在本机跑一次退出观察到的；本机没有可复现的 Codespace
   目标，无法做端到端退出观察。
+
+## 发布（维护者）
+
+包名 `dsh-codespace-workspace` 已发布到 npm。`package.json` 里写了 `publishConfig`
+（`access: public` + `registry: https://registry.npmjs.org/`），所以**直接 `npm publish`
+不带任何参数**就会发到正确的地方——即使本机 `~/.npmrc` 指向的是镜像站。
+
+> 注意：这个包曾经带 `"private": true`（那时只从 GitHub 装）。npm 会以 `EPRIVATE`
+> 直接拒绝发布，所以该字段已**删除**（不是改成 `false`）。`test/check.mjs` 里有一条
+> 断言专门盯着它「必须不存在」，复制回来会立刻变红。
+
+后续版本走 `.github/workflows/publish.yml`，用 npm **Trusted Publishing（OIDC）** 认证：
+GitHub 给这个 job 签一个短时 token，npm 拿它换一个只对这一个包有效的发布 token。
+**仓库里没有任何 `NPM_TOKEN` secret。** 工作流刻意**不用** `actions/setup-node` 的
+`registry-url` 输入——它会往 `~/.npmrc` 写
+`//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`，而该变量没定义时这个占位符会
+原样留下、被 npm 当作 token 发出去。registry 交给 `publishConfig` 就够了。
+
+工作流在发布前会先 `npm install` 那两个 peer（`@deepseek-ai/cordis`、
+`@deepseek-ai/schemastery`）：本仓库故意不 vendor 它们，而 `test/check.mjs` 是沿着
+import 路径往上找的，装到仓库自己的 `node_modules` 里才能跑到真实模块。
+
+发版步骤：
+
+1. 改 `package.json` 的 `version`，提交。
+2. 为那个 commit 创建 GitHub Release。工作流会先跑测试再 `npm publish`；npm 自身拒绝
+   重发已存在的版本，所以重跑不会覆盖线上内容。
+
+<details>
+<summary>一次性配置：绑定 Trusted Publisher</summary>
+
+Trusted Publisher **只能绑到 registry 上已存在的包**，所以**首次发布必须手工**
+（在检出目录里跑一次 `npm publish`），之后才轮到工作流接管。在 npmjs.com 上：
+包 → Settings → Trusted Publisher → GitHub Actions，填
+
+| 字段 | 值 |
+|---|---|
+| Repository | `Ckarefulon/dsh-codespace-workspace` |
+| Workflow filename | `publish.yml` |
+| Environment | *留空* |
+
+</details>
 
 ## 文档
 
