@@ -4,7 +4,19 @@
   "description": "Use a GitHub Codespace directly as a DSH workspace: the agent reads, writes and runs commands inside the cloud Codespace.",
   "type": "module",
   "license": "MIT",
-  "private": true,
+  "author": "Ckarefulon",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ckarefulon/dsh-codespace-workspace.git"
+  },
+  "homepage": "https://github.com/Ckarefulon/dsh-codespace-workspace#readme",
+  "bugs": {
+    "url": "https://github.com/Ckarefulon/dsh-codespace-workspace/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "main": "./lib/index.js",
   "exports": {
     ".": "./lib/index.js",

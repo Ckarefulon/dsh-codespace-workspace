@@ -80,7 +80,11 @@ section('package manifest')
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 eq('name', pkg.name, 'dsh-codespace-workspace')
 eq('type is module (the host half is ESM)', pkg.type, 'module')
-eq('private', pkg.private, true)
+// This package is published to npm, and npm refuses to publish a manifest that
+// still carries `private: true`. Asserting the field is ABSENT (rather than
+// equal to false) catches the mistake the moment someone copies it back in.
+eq('private', pkg.private, undefined)
+eq('publishConfig.registry', pkg.publishConfig?.registry, 'https://registry.npmjs.org/')
 
 for (const [key, value] of Object.entries(pkg.exports ?? {})) {
   if (typeof value !== 'string' || key === './package.json') continue

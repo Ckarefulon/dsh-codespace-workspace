@@ -113,17 +113,21 @@ Agent 拥有完整的 `git` 命令执行能力。**插件不干预 Git 操作，
 ## 安装
 
 ```powershell
-# 1. 克隆到工作区
-git clone <this-repo> dsh-codespace-workspace
+# 1. 装进当前 profile（只改写 profile 的 package.json dependencies 与 lockfile）
+dsh plugin --profile desktop add dsh-codespace-workspace
 
-# 2. 装进当前 profile（只改写 profile 的 package.json dependencies 与 lockfile）
-dsh plugin --profile desktop add "link:<绝对路径>\dsh-codespace-workspace"
-
-# 3. 把包名登记进 dsh.profile.bundles，否则不会被挂载
+# 2. 把包名登记进 dsh.profile.bundles，否则不会被挂载
 #    编辑 %USERPROFILE%\.dsh\profiles\desktop\package.json
 #    在 dsh.profile.bundles 数组里加入 "dsh-codespace-workspace"
 
-# 4. 重启 DSH（插件文件改动不会热生效）
+# 3. 重启 DSH（插件文件改动不会热生效）
+```
+
+也可以从本地克隆装（改代码时用这个）：
+
+```powershell
+git clone <this-repo> dsh-codespace-workspace
+dsh plugin --profile desktop add "link:<绝对路径>\dsh-codespace-workspace"
 ```
 
 `dsh plugin add` 只改 `dependencies` 与 `pnpm-lock.yaml`，**不会**登记
