@@ -43,20 +43,28 @@ SSH 主机列表里塞任何东西，因此不会和其他云工作区插件冲�
   云朵固定不变，不随 Codespace 状态变化。
 - 操作按钮位于**倒数第三个**——在三个点菜单和新建对话按钮之前。
 - 显示逻辑跟随宿主默认行为：不 hover 时隐藏；打开「始终显示」后常显。
-- 按钮状态（四个图标都是**照着宿主图标手绘的 SVG**，不是 emoji）：
+- **正在使用的工作区，云朵和宿主的文件夹图标一样变蓝**：宿主给「拥有当前会话」的那个工作区
+  的图标槽加 `folderActive`，云朵就排在那个槽里，**继承**它的颜色，不自己定颜色。
+- 按钮状态（四个图标都是**照着宿主图标手绘的 SVG**，不是 emoji；转圈用的是宿主自己的
+  `IconLoadingOutline` 圆弧，不是 CSS 方块环）：
 
 | 状态 | 图标 | 悬停提示 | 点击 |
 |---|---|---|---|
 | 已停止 | 播放 | 启动 Codespace | 启动 |
 | 运行中 | 暂停 | 暂停 Codespace | 暂停 |
 | 倒计时中 | 闹钟 | 还剩 X 分钟自动暂停 | 取消倒计时 |
-| 启动/暂停中 | 转圈 | — | 不可点 |
+| 启动/暂停中 | 转圈 | 正在切换状态… | 不可点 |
+
+**转圈只表示「状态正在变化」**，不表示「Agent 正在干活」——后者会让按钮整个回合都在转。
 
 **双击时钟图标 = 立即暂停。**
 
 工作区行的标题用**仓库短名**（`owner/name` 里的 `name`）——Codespace 自己的名字是机器生成的
 （`psychic-goggles-7v9974jwpwr5fpqxq`），看不出是哪个项目。标题装不下的两件事放在 hover
 卡片里：那一行「工作区位置」显示 **`owner/name · Codespace 名字`**。
+
+**在 Codespace 会话里发消息时，会先等 Codespace 跑起来**：如果它已经自动暂停（或还在启动），
+这一轮会等到 `Available` 才真正发给模型，而不是让每个工具调用都报连接错误。
 
 ### 新建云端工作区
 
@@ -81,6 +89,10 @@ SSH 主机列表里塞任何东西，因此不会和其他云工作区插件冲�
 - **退出 DSH 时**：尝试自动关闭所有本插件管理的 Codespace。
 - **自动暂停**：一轮对话结束后开始倒计时；倒计时期间用户发新消息 → 取消倒计时，
   等 Agent 干完活重新计时；点时钟 → 取消；双击时钟 → 立即暂停。
+- **发消息前保证机器在跑**：挂 `agent/pre-step`（Agent 循环在向模型要 step 之前会
+  **await** 这个 waterfall），发现 Codespace 没运行就先启动、等它变成 `Available`
+  再放行。启动失败或超时不会把这一轮卡死——照常放行，让模型看到真实的连接错误。
+  等待期间你点「停止」/发送中断会立刻结束等待（转发的是这一轮的 abort signal）。
 
 ### Git
 
@@ -201,8 +213,9 @@ test/
 四套离线自检（不需要 token、`gh` 或真实 Codespace），加一套需要令牌的联网自检：
 
 ```bash
-# Node 侧：包清单、Config 默认值、RPC 动作表与 HTTP 守卫、shell 引用、文案一致性
-node test/check.mjs                # 148 项，全通过
+# Node 侧：包清单与打包白名单、Config 默认值、RPC 动作表与 HTTP 守卫、
+# 工作区命名、发消息前的就绪检查、shell 引用、文案一致性
+node test/check.mjs                # 181 项，全通过
 
 # 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
 node test/shutdown.mjs             # 31 项，全通过
@@ -213,7 +226,7 @@ node test/e2e.mjs                  # 全通过（找不到已安装的 Harness �
 
 # 浏览器侧：在真实 DOM 里跑真实 bundle，对着宿主 markup/CSS 的忠实副本
 node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
-                                   # 203 项，全通过
+                                   # 217 项，全通过
 
 # 联网：用 gh 的令牌打真实 GitHub API（无令牌时自动 SKIP）
 node test/live.mjs
@@ -450,7 +463,7 @@ setPrebuild(data.hasPrebuild === true ? true : false)   // null 被压成 false
   渲染落到「该仓库已配置预构建。」那一支 —— 恰好说了与刚刚相反的话。现在确认后不再显示
   任何提示，而不是显示一句假的。
 
-浏览器套件 136 → **147 项**（后续又涨到 201，见下文「十一」），其中 8 项专测这三态（含
+浏览器套件 136 → **147 项**（后续又涨到 217，见下文「十一」「十三」），其中 8 项专测这三态（含
 「`null` 绝不能说成未配置」和「确认后绝不能说成已配置」两条否定断言）。
 
 **十、云端会话里本地工具根本没让位 —— 提示词说远程，手上还是本地**
@@ -627,6 +640,58 @@ key」：
 `check` 122 → **147 项**（含 10 项 `titleForCodespace`、11 项打包白名单、2 项内联字典），
 浏览器套件 201 → **203 项**。两处都反向验证过牙齿：把 `icon.svg` 从白名单里删掉 → 1 项变红；
 把 hover 那行退回只显示标签 → 1 项变红（`got "my-box", want "Ckarefulon/app.ckarefulon.main · my-box"`）。
+
+**十三、云朵不变蓝、转圈停不下来、转圈是个方块，以及发消息不等机器**
+
+四处都是「照理说应该很明显」的问题，四处的原因各不相同。
+
+**（一）正在使用的工作区里，云朵不变蓝**
+
+宿主是这样标记「当前会话所在的工作区」的：给那一行的**文件夹图标槽**加一个
+`folderActive` 类，规则是 `.…_folderActive{color:var(--dsw-alias-state-business-primary)}`
+—— 也就是变蓝。云朵本来就排在那同一个 span 里、`stroke="currentColor"`，看起来应该自动继承。
+
+问题是**我自己给云朵的容器写了一行 `color: var(--dsw-alias-label-secondary)`**。继承是继承，
+但**显式声明会盖掉继承值**，于是云朵永远是灰的。删掉那行就好——位置、尺寸、颜色、悬停让位
+全都该由宿主的 CSS 说了算。
+
+这条还牵出一个**夹具的老毛病**（这是第三次了，前两次是 16×16 当 28×28、`:hover` 当无条件）：
+夹具里 `.hIlkoa_slot`（设 `label-tertiary`）**排在** `.hIlkoa_folderActive` **后面**，
+而真实宿主里是反过来的。两个都是单类选择器，同优先级，所以**后写的赢** —— 夹具里的
+`folderActive` 根本不起作用，颜色测试一开始是红的。夹具的规则顺序已按宿主改正，并写了注释。
+
+**（二）「正在切换状态…」能转一整个回合**
+
+`isBusy()` 里有一行 `if (record.busy === true) return true`。而 `record.busy` 是
+**host 在 `user/message` 时置位、在 `turn/end` 时清除**的 —— 它的意思是「Agent 正在这个
+工作区里干活」，可以持续好几分钟。把它接进「该不该转圈」里，按钮就会在整个回合里转，还
+配着「正在切换状态…」这句错误的话，而 GitHub 那边的状态其实很明确。现在 `isBusy` 只认两件事：
+**我们自己的 RPC 在飞**，或者 **GitHub 说它确实在过渡态**（`Provisioning`/`Starting`/
+`ShuttingDown`…）。`record.busy` 保留在契约里，只是不再驱动这个按钮。
+
+**（三）转圈图标是个方块**
+
+原来是一个 CSS 环：`border:2px solid; border-top-color:transparent; border-radius:50%`。
+但宿主自己的加载指示器是 **`IconLoadingOutlineRegular`** —— 一段圆圆弧，配一个纯旋转动画
+（在 DSH 自己的 bundle 里核对过）。现在照抄它，于是转圈和那四个状态图标、以及旁边宿主的
+控件是同一套语言（16px、`currentColor`、1px 描边）。顺带补了 `prefers-reduced-motion`。
+
+**（四）发消息时没有等 Codespace 起来**
+
+Codespace 自动暂停之后，直接在会话里发消息，每个远程工具调用都会撞上连接错误。现在挂
+**`agent/pre-step`**：Agent 循环在向模型要 step 之前会 **await** 这个 waterfall
+（`dsh-agent-loop/lib/index.js` ≈L911），所以在这里等是真的在推迟这一轮，而不是和它赛跑。
+DSH 自己的 `archived-session-gate` 用的是同一个钩子 —— 但它是**拦住**这一轮；这里要的是
+**等**，所以拿到结果后照常 `next()`。
+
+几个克制的设计：**本地会话完全不碰**（cwd 判断在最前面）；`ensureRunning` 永不抛错，失败就
+`{ok:false, reason}` 然后照常放行（否则用户会看到一轮莫名其妙地什么都没发生，而不是一个
+明确的连接错误）；等待受这一轮的 abort signal 约束，用户中断立刻结束；成功状态记 20 秒，
+所以一个回合最多查一次 GitHub，而不是每一步都查。
+
+`check` 147 → **181 项**（33 项新增：`ensureRunning` 的各种路径 + `agent/pre-step` 网关的
+行为），浏览器套件 203 → **217 项**。三处都反向验证过牙齿：不启动机器 + 把过渡态当成就绪
+→ 6 项变红；给云朵加回颜色 + 让 `busy` 重新驱动转圈 → 8 项变红。
 
 ## 已知限制
 

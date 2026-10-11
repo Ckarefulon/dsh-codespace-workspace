@@ -707,6 +707,42 @@ check(row.querySelector('[class*="_folder"]') !== null, 'the host folder span wa
 check(row.querySelector('[class*="_chevron"]') !== null, 'the host chevron span was NOT removed')
 check(row.querySelector('[class*="_title"]') !== null, 'the host title span was NOT removed')
 
+// The workspace that owns the current session turns BLUE, and the cloud has to
+// come along: the host adds `folderActive` to the folder span and colours it, so
+// any colour this bundle sets on the marker silently wins over it.
+{
+  // `currentColor` lives on the PATH, not on the `<svg>`, so the path's computed
+  // `stroke` is the thing that actually paints — `getComputedStyle(svg).stroke`
+  // is `none` and would prove nothing.
+  const cloudPath = icon.querySelector('svg path')
+  const resting = getComputedStyle(folder).color
+  eq('at rest the cloud wears the slot’s own colour',
+    getComputedStyle(cloudPath).stroke, resting)
+
+  folder.classList.add(HASH + 'folderActive')
+  await settle(30)
+  const active = getComputedStyle(folder).color
+  // Resolve the token through a probe: `var(--x)` is `#4F6BED` but
+  // `getComputedStyle` reports `rgb(79, 107, 237)`, so comparing the raw text
+  // would fail for the wrong reason.
+  const probe = document.createElement('span')
+  probe.style.color = 'var(--dsw-alias-state-business-primary)'
+  document.body.appendChild(probe)
+  const business = getComputedStyle(probe).color
+  probe.remove()
+  check(active !== resting, 'activating the workspace changes the slot colour', `${resting} -> ${active}`)
+  eq('  -> the cloud inherits the active colour rather than a colour of its own',
+    getComputedStyle(cloudPath).stroke, active)
+  eq('  -> which is the host’s business colour', active, business)
+  eq('  -> so the cloud really is the blue one', getComputedStyle(cloudPath).stroke, business)
+  check(getComputedStyle(icon).color === active,
+    '  -> and nothing in the marker’s own CSS overrides it', getComputedStyle(icon).color)
+
+  folder.classList.remove(HASH + 'folderActive')
+  await settle(30)
+  eq('  -> and it goes back at rest', getComputedStyle(cloudPath).stroke, resting)
+}
+
 const button = row.querySelector('[data-dsh-codespace-action]')
 check(button !== null, 'the action button was injected')
 check(button !== null && actions.firstElementChild === button,
@@ -760,6 +796,7 @@ const ICON_START = {
     'M10.3329 7.91346C10.3996 7.95195 10.3996 8.04818 10.3329 8.08667L6.78304 10.1362C6.71638 10.1747 6.63304 10.1266 6.63304 10.0496L6.63304 5.95055C6.63304 5.87357 6.71638 5.82546 6.78304 5.86395L10.3329 7.91346Z',
   ],
 }
+const ICON_LOADING = 'M12.596 12.596C11.687 13.5049 10.5288 14.1239 9.26798 14.3747C8.00716 14.6255 6.70028 14.4968 5.51261 14.0048C4.32494 13.5129 3.30981 12.6798 2.59557 11.611C1.88134 10.5421 1.50008 9.2855 1.5 7.99998C1.50008 6.71446 1.88134 5.45783 2.59557 4.38898C3.30981 3.32013 4.32494 2.48707 5.51261 1.99513C6.70028 1.50319 8.00716 1.37447 9.26798 1.62524C10.5288 1.87602 11.687 2.49502 12.596 3.40398'
 
 /**
  * The glyph's own `d` attributes, joined.
@@ -829,9 +866,32 @@ eq('counting down → tooltip carries the minutes', await tooltipTextOf(button),
 record = { ...record, autoPauseRemainingMs: 0, codespace: { ...record.codespace, state: 'Provisioning' } }
 await untilGlyph('pending')
 check(button.querySelector('[data-dsh-codespace-glyph]') === null, 'starting → no glyph')
-check(button.querySelector('.dcw-spin') !== null, 'starting → spinner shown')
+const spinner = button.querySelector('.dcw-spin')
+check(spinner !== null, 'starting → spinner shown')
+// A ROUND icon, not a CSS border ring: the ring's squared-off look is what made
+// this read as a square, and it ignored the icon set's stroke/colour language.
+const spinnerSvg = spinner?.querySelector('svg')
+check(spinnerSvg !== null, 'starting → the spinner is an inline svg, not a css ring')
+eq('  -> it is the host’s round loading arc',
+  spinnerSvg === null ? null : Array.from(spinnerSvg.querySelectorAll('path')).map((p) => p.getAttribute('d')).join('|'),
+  ICON_LOADING)
+eq('  -> stroke-width on the svg, as the host does', spinnerSvg?.getAttribute('stroke-width'), '1')
+eq('  -> and it is the only spinning thing (no border ring left behind)',
+  getComputedStyle(spinner).borderTopWidth, '0px')
+eq('  -> rotating', getComputedStyle(spinner).animationName, 'dcw-spin')
 eq('starting → disabled', button.disabled, true)
 eq('starting → tooltip', await tooltipTextOf(button), '正在切换状态…')
+
+// `record.busy` means "the agent is working here", NOT "a state change is in
+// flight". It is set on the first user message and cleared only at turn end, so
+// feeding it into the spinner made the row spin with 「正在切换状态…」 for the whole
+// turn while GitHub was reporting a settled state.
+record = { ...record, busy: true, codespace: { ...record.codespace, state: 'Available' } }
+await untilGlyph('stop')
+check(button.querySelector('.dcw-spin') === null,
+  'a working agent does NOT spin the button when the state is settled')
+eq('  -> the tooltip is about the state, not about switching', await tooltipTextOf(button), '暂停 Codespace')
+record = { ...record, busy: false }
 
 // error
 record = { ...record, codespace: { ...record.codespace, state: 'Failed' } }

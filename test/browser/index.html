@@ -19,6 +19,8 @@
     --dsw-alias-label-secondary: #8b8b8b;
     --dsw-alias-label-tertiary: #a0a0a0;
     --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, .08);
+    /* The colour the host gives the workspace that owns the current session. */
+    --dsw-alias-state-business-primary: #4F6BED;
   }
   /* The host's real metrics, copied from dsh-client-ui-workspace so the
      reveal/hide mechanics behave exactly as in the app. The hash prefix is
@@ -40,7 +42,13 @@
   .hIlkoa_iconButton { border-radius: var(--dsw-radius-xs, 4px); cursor: pointer; width: 16px; height: 16px;
     color: var(--dsw-alias-label-tertiary, #888); background: 0 0; border: none; flex: none;
     justify-content: center; align-items: center; padding: 0; display: inline-flex; }
-  .hIlkoa_slot { width: 16px; height: 20px; flex: none; justify-content: center; align-items: center; display: inline-flex; }
+  .hIlkoa_slot { width: 16px; height: 20px; color: var(--dsw-alias-label-tertiary); flex: none; justify-content: center; align-items: center; display: inline-flex; }
+  /* ORDER MATTERS, and this matches the host: `.folderActive` sits AFTER
+     `.slot` in the real Rows module, and both are single-class selectors — so the
+     later one wins the cascade and the active workspace really does go blue. Put
+     it before `.slot` and the colour never changes, which is exactly how this
+     fixture was wrong until the colour assertion caught it. */
+  .hIlkoa_folderActive { color: var(--dsw-alias-state-business-primary); }
   .hIlkoa_hoverContent { flex-direction: column; gap: 8px; display: flex; }
   .hIlkoa_hoverPath { color: #cfd3d6; word-break: break-all; font-size: 12px; line-height: 16px; }
 

@@ -468,8 +468,28 @@ hardcoded settings nav icon. Rules:
 ### Lifecycle events we may rely on
 
 * `agent/created` (serial) — per-agent setup.
+* **`agent/pre-step` (waterfall, AWAITED) — the hook that can delay a turn.**
+  `dsh-agent-loop/lib/index.js` ≈L902–925 calls
+  `await this.dispatch.waterfall("agent/pre-step", { messages, turn, step, signal }, fallback)`
+  before it requests a model step, and the fallback resolves
+  `{ kind: 'enter', messages }`. A listener takes `(payload, next)`; **`await
+  next()` runs the rest of the chain**, and the return value is the decision. So
+  a listener that resolves late genuinely delays the turn.
+  * Use it to **wait** (this plugin: `ensureRunning`); `{ kind: 'reject' }`
+    instead **blocks** the step and ends the turn as `blocked` with no message —
+    which is what DSH's own `archived-session-gate` does, and it is *not* what a
+    user-facing "wait for my machine" wants.
+  * `payload.signal` is the turn's `AbortSignal`; forward it so a cancel or a
+    shutdown cuts the wait short.
+  * A listener that throws breaks the turn, so wrap the body and always call
+    `next()`.
 * `turn/end`, `assistant/message`, `tool/result` — durable; use these to start
   the auto-pause countdown. Do **not** poll `agent/status`.
+  * **`record.busy` (set on `user/message`, cleared on `turn/end`) means "the
+    agent is working here", and must NOT drive a spinner.** It lasts as long as
+    the turn, so using it as "a state change is in flight" left the row spinning
+    with 「正在切换状态…」 for the whole turn while GitHub reported a settled
+    state. The client's `isBusy` deliberately ignores it.
 * `app-boot/config-reload` — the composition changed.
 * **Settings change events are NOT what an earlier draft of this file said.**
   Grepping `@deepseek-ai/dsh-settings` for its event names yields exactly two:

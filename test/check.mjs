@@ -15,7 +15,8 @@
  *
  * Run: node test/check.mjs
  */
-import { readFileSync, existsSync, statSync, mkdirSync, symlinkSync, rmdirSync } from 'node:fs'
+import { readFileSync, existsSync, statSync, mkdirSync, symlinkSync, rmdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import vm from 'node:vm'
@@ -600,7 +601,202 @@ if (!ensurePeers()) {
   eq('a non-object is handled', titleForCodespace(null), '')
 
   /* ---------------------------------------------------------------- *
-   * 7. Shell quoting.
+   * 7. Codespace readiness (the "wait for it to start" path).
+   * ---------------------------------------------------------------- */
+
+  section('codespace readiness')
+
+  const { CodespaceManager } = await load('../lib/host/codespaces.js')
+  check(typeof CodespaceManager === 'function', 'CodespaceManager is exported')
+
+  const roots = []
+  /**
+   * A manager whose GitHub calls are scripted.
+   *
+   * `states` is what `listCodespaces` reports on successive calls; the LAST value
+   * repeats forever, which is how the timeout case is expressed. Each listing
+   * advances the sequence and `start` does not, because it is the listing that
+   * observes a state — a real `start` changes GitHub's state, not our cursor.
+   *
+   * @param {string[]} states - the state sequence.
+   * @param {{missing?: boolean, startFails?: boolean, listFails?: boolean}} [options] - failure switches.
+   * @returns {{manager: object, calls: {listed: number, started: number}}} the fake.
+   */
+  function readinessManager(states, options = {}) {
+    const home = mkdtempSync(join(tmpdir(), 'dcw-ready-'))
+    roots.push(home)
+    const manager = new CodespaceManager({}, { profileHome: home })
+    manager.records.set('ws-1', {
+      workspaceId: 'ws-1', name: 'cs-1', title: 'app', path: join(home, 'cs-1'), addedAt: 0,
+    })
+    manager.loaded = true
+    const calls = { listed: 0, started: 0 }
+    let cursor = 0
+    manager.listCodespaces = async () => {
+      calls.listed += 1
+      if (options.listFails === true) throw new Error('offline')
+      const state = states[Math.min(cursor, states.length - 1)]
+      cursor += 1
+      return options.missing === true ? [] : [{ name: 'cs-1', state }]
+    }
+    manager.start = async (name) => {
+      calls.started += 1
+      if (options.startFails === true) throw new Error('start rejected')
+      return { name, state: states[Math.min(cursor, states.length - 1)] }
+    }
+    return { manager, calls }
+  }
+
+  const FAST = { pollMs: 1, timeoutMs: 400 }
+
+  // Already running: no start request, and the state is remembered.
+  {
+    const { manager, calls } = readinessManager(['Available'])
+    const first = await manager.ensureRunning('ws-1', FAST)
+    check(first.ok === true, 'a running Codespace is ready')
+    eq('  -> and nothing was started', calls.started, 0)
+    eq('  -> after exactly one listing', calls.listed, 1)
+    const second = await manager.ensureRunning('ws-1', FAST)
+    eq('a second call within the memo window does not re-list', calls.listed, 1)
+    eq('  -> and reports why', second.reason, 'remembered')
+    manager.forgetRunning('cs-1')
+    await manager.ensureRunning('ws-1', FAST)
+    eq('forgetting the memo makes it check again', calls.listed, 2)
+  }
+
+  // Stopped: it is started, and the wait polls until the state settles.
+  {
+    const { manager, calls } = readinessManager(['Shutdown', 'Provisioning', 'Available'])
+    const outcome = await manager.ensureRunning('ws-1', FAST)
+    check(outcome.ok === true, 'a stopped Codespace is started and then waited for')
+    eq('  -> exactly one start request', calls.started, 1)
+    eq('  -> and the outcome says it was started', outcome.reason, 'started')
+  }
+
+  // Already transitioning: NOT started again, just waited out.
+  {
+    const { manager, calls } = readinessManager(['Provisioning', 'Available'])
+    const outcome = await manager.ensureRunning('ws-1', FAST)
+    check(outcome.ok === true, 'a Codespace already coming up is waited for')
+    eq('  -> without a second start request', calls.started, 0)
+    eq('  -> and the outcome says so', outcome.reason, 'became-running')
+  }
+
+  // Never settles: bounded, and reported rather than thrown.
+  {
+    const { manager } = readinessManager(['Provisioning'])
+    const outcome = await manager.ensureRunning('ws-1', FAST)
+    check(outcome.ok === false, 'a Codespace that never settles gives up')
+    eq('  -> saying why', outcome.reason, 'timeout')
+    eq('  -> and carrying the last state', outcome.state, 'Provisioning')
+  }
+
+  // A terminal failure stops the wait immediately.
+  {
+    const { manager } = readinessManager(['Shutdown', 'Failed'])
+    const outcome = await manager.ensureRunning('ws-1', FAST)
+    eq('a failed transition is reported, not waited out', outcome.reason, 'failed')
+  }
+
+  // Every "cannot" path is a value, never a throw -- the turn must still run.
+  {
+    const unmanaged = await readinessManager(['Available']).manager.ensureRunning('nope', FAST)
+    eq('an unmanaged workspace is reported', unmanaged.reason, 'unmanaged')
+    const missing = await readinessManager(['Available'], { missing: true }).manager.ensureRunning('ws-1', FAST)
+    eq('a Codespace GitHub no longer has is reported', missing.reason, 'missing')
+    const offline = await readinessManager(['Available'], { listFails: true }).manager.ensureRunning('ws-1', FAST)
+    eq('an unreachable API is reported', offline.reason, 'unreachable')
+    const refused = await readinessManager(['Shutdown'], { startFails: true }).manager.ensureRunning('ws-1', FAST)
+    eq('a refused start is reported', refused.reason, 'start-failed')
+  }
+
+  // An aborted turn stops waiting immediately (that is the user cancelling).
+  {
+    const { manager } = readinessManager(['Shutdown', 'Provisioning'])
+    const controller = new AbortController()
+    controller.abort()
+    const outcome = await manager.ensureRunning('ws-1', { ...FAST, signal: controller.signal })
+    eq('an abort stops the wait', outcome.reason, 'aborted')
+  }
+  {
+    // Aborting mid-wait must not require the full poll to elapse.
+    const { manager } = readinessManager(['Shutdown', 'Provisioning'])
+    const controller = new AbortController()
+    const started = Date.now()
+    const pending = manager.ensureRunning('ws-1', { signal: controller.signal, pollMs: 5000, timeoutMs: 60000 })
+    setTimeout(() => controller.abort(), 20)
+    const outcome = await pending
+    eq('aborting mid-wait returns immediately', outcome.reason, 'aborted')
+    check(Date.now() - started < 3000, '  -> without waiting out the poll interval',
+      `${Date.now() - started}ms`)
+  }
+
+  /* ---------------------------------------------------------------- *
+   * 8. The pre-step gate (what makes the message actually wait).
+   * ---------------------------------------------------------------- */
+
+  section('pre-step readiness gate')
+
+  const { installSessionWiring } = await load('../lib/host/session.js')
+  {
+    const handlers = new Map()
+    const effects = []
+    const fakeCtx = {
+      effect: (fn) => {
+        const dispose = fn()
+        effects.push(dispose)
+        return () => { if (typeof dispose === 'function') dispose() }
+      },
+      on: (name, handler) => {
+        handlers.set(name, handler)
+        return () => handlers.delete(name)
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    }
+    const gateCalls = []
+    const gateManager = {
+      isCodespacePath: (cwd) => (cwd === '/cloud' ? 'ws-1' : undefined),
+      ensureRunning: async (id, options) => {
+        gateCalls.push({ id, signal: options?.signal })
+        return { ok: true, reason: 'running' }
+      },
+      dispose() {},
+      stopAll: async () => ({ attempted: 0, stopped: 0, pending: [] }),
+    }
+
+    const teardown = installSessionWiring(fakeCtx, gateManager, { getSettings: () => ({}) })
+    const gate = handlers.get('agent/pre-step')
+    check(typeof gate === 'function', 'installSessionWiring registers an agent/pre-step handler')
+
+    const okNext = async () => ({ kind: 'enter', messages: ['kept'] })
+    let passed = 0
+    const next = async () => { passed += 1; return okNext() }
+
+    // A local session must not be delayed at all.
+    const local = await gate({ agent: { session: { header: { cwd: '/local' } } } }, next)
+    eq('a local session skips the gate', gateCalls.length, 0)
+    eq('  -> and the decision chain still runs', local.kind, 'enter')
+
+    // A Codespace session waits, and the agent's signal is forwarded.
+    const controller = new AbortController()
+    const before = passed
+    await gate({ agent: { session: { header: { cwd: '/cloud' } } }, signal: controller.signal }, next)
+    eq('a Codespace session asks for readiness', gateCalls.length, 1)
+    eq('  -> for the right workspace', gateCalls[0].id, 'ws-1')
+    check(gateCalls[0].signal === controller.signal, '  -> forwarding the turn’s abort signal')
+    eq('  -> and the decision chain still runs', passed, before + 1)
+
+    // A failure inside the gate must not break the turn.
+    gateManager.ensureRunning = async () => { throw new Error('boom') }
+    const survived = await gate({ agent: { session: { header: { cwd: '/cloud' } } } }, next)
+    eq('a gate that throws still lets the turn run', survived.kind, 'enter')
+
+    teardown()
+    check(handlers.get('agent/pre-step') === undefined, 'teardown removes the gate')
+  }
+
+  /* ---------------------------------------------------------------- *
+   * 9. Shell quoting.
    * ---------------------------------------------------------------- */
 
   section('shell quoting')
@@ -613,6 +809,11 @@ if (!ensurePeers()) {
   eq('a backtick cannot break out', shq('`whoami`'), "'`whoami`'")
   eq('a dollar sign cannot expand', shq('$HOME'), "'$HOME'")
   eq('an empty string still quotes', shq(''), "''")
+
+  // The readiness fakes each made a throwaway profile home.
+  for (const home of roots) {
+    try { rmSync(home, { recursive: true, force: true }) } catch { /* best effort */ }
+  }
 }
 
 /* ------------------------------------------------------------------ *
