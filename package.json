@@ -1,6 +1,6 @@
 {
   "name": "dsh-codespace-workspace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Use a GitHub Codespace directly as a DSH workspace: the agent reads, writes and runs commands inside the cloud Codespace.",
   "type": "module",
   "license": "MIT",
