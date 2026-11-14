@@ -243,7 +243,7 @@ test/
 ```bash
 # Node 侧：包清单与打包白名单、Config 默认值、RPC 动作表与 HTTP 守卫、
 # 工作区命名、发消息前的就绪检查、shell 引用、文案一致性
-node test/check.mjs                # 181 项，全通过
+node test/check.mjs                # 230 项，全通过
 
 # 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
 node test/shutdown.mjs             # 31 项，全通过
@@ -802,6 +802,91 @@ GitHub 文档的口径是：默认 dev container 镜像自带并自动启动 ssh
 **小结这一条**：插件缺陷已修（并有用例守住），但 `app.ckarefulon.main` 这个仓库要能用
 云端工作区，**中间必须补 `.devcontainer/devcontainer.json` 的 sshd feature 并重建
 Codespace**——那是仓库的改动，不是插件的。
+
+**十五、sshd 装上之后，还有三个「静默给错答案」的缺陷（2026-11-14）**
+
+第十四条修完、sshd 也装上之后，我拿真实 Codespace 跑了四个远程工具。结果仍有一半是坏的，
+而且**坏法比之前的更隐蔽**：命令都成功了，答案是错的。
+
+**（一）远程工作目录用的是本地占位路径**
+
+`buildTarget()` 原来的写法是 `const cwd = record?.path ?? '/'`。而 `record.path` 是
+**DSH 注册工作区用的本地占位目录**（Windows 上是
+`C:\Users\…\.dsh\codespaces\<name>`）。把它当远程 cwd 用，`remoteResolve()` 只保留开头的
+`/`，于是：
+
+```
+remoteResolve('C:\\Users\\…\\codespaces\\cs', 'README.md')  ->  '/README.md'
+```
+
+表现按工具分叉，这才是我最初被绕进去的地方：`bash` 会 `cd <workdir> 2>/dev/null`，`cd`
+失败被吞掉、落在容器的默认目录上，**所以看起来是好的**；而 `read`/`glob`/`grep` 老老实实
+去 `/` 下面找文件，得到的是「not found」。
+
+修法：`normalizeCodespace()` 现在把 API 的 `connection.sessionPath`
+（`/workspaces/app.ckarefulon.main`）作为 `remoteCwd` 单独报出来，`CodespaceManager`
+新增 `remoteCwdFor(workspaceId)` 负责解析，`buildTarget()` 只认绝对 POSIX 路径、拿不到就
+退回 `/` 并**记一条 warn**（宁可吵，也不要静默走错目录）。Codespace 停着时 API 不给
+`sessionPath`，此时退回 Codespaces 自己的克隆布局 `/workspaces/<repo 名>`
+（`deriveRemoteCwd()`）；GitHub 不可达时用上次成功列到的仓库名，不会因此丢掉工作区。
+
+**（二）`remoteStat` 的分隔符从来没生效，于是每个文件都「不存在」**
+
+```js
+'stat -c "%F\\t%s\\t%Y"'
+```
+
+GNU `stat -c` **不解释**格式串里的反斜杠转义（只有 `--printf` 解释），而这个格式又是在
+双引号 shell 词里传过去的，`\t` 到容器里还是两个字符。实测（coreutils 9.1）：
+
+```
+$ stat -c "%F\t%s\t%Y" README.md
+regular file\t10094\t1794644544
+```
+
+按真 tab 切分一个字段都切不出来 → `parts.length < 3` → 返回 `null`。而**所有调用方都把
+`null` 读成「文件不存在」**，所以 `read` 对明明存在的文件报 `not found`；偏偏同一时刻
+`remoteReadText` 读得出来，两边矛盾得毫无道理。
+
+修法：分隔符换成 `|`（`%F` 是短类型词、`%s`/`%Y` 是整数，不会含 `|`，GNU 与 BSD 写法
+一致）。用例里专门把**旧的 `\t` 形态**固化成一个断言，要求它必须解析失败——这样谁再改回
+转义就会红。
+
+**（三）容器里没有 `rg`，于是每次搜索都「没有匹配」**
+
+```js
+`rg … 2>/dev/null | head -n 250`
+```
+
+`mcr.microsoft.com/devcontainers/java` 这个基础镜像里**没有 ripgrep**（实测
+`command -v rg` 无输出）。`rg` 找不到 → 空 stdout + `2>/dev/null` 把错误也吞了 → 管道
+整体退出 0 → 工具老实地渲染成「(no matches)」。**一个搜索工具最不能有的失败模式就是
+静默假阴性**：模型会由此断定「仓库里没有这个符号」。
+
+`glob` 是同一个毛病的另一半：`rg --files … || find . -name '**/*.ts'`，`find -name` 要的
+是 basename glob、`**/*.ts` 永远匹配不到，两条路一起失效。
+
+修法：`grep` 显式 `if command -v rg >/dev/null 2>&1; then rg …; else grep -rEn …; fi`，
+并把「退出码 1 以外且有 stderr」当成真错误抛出来（1 是两者的正常「无匹配」）；`glob` 把
+pattern 归一成 basename 形态再交给 `find`，并用 `|| true` 只容忍「某个子目录读不了」，
+不再让整条管道隐身。
+
+**这一条的方法论**：三个缺陷全都不抛错、TypeScript 也没有形状可看，只能拿**真实容器**
+跑一遍才有结论。所以本轮新增的验证不是「跑单测」，而是
+`cs-live-verify.mjs`——用真实 `CodespaceManager`、真实 `gh`、真实 Codespace，把
+`read`/`glob`/`grep`/`bash` 四个工具按 agent 的调用方式各跑一次。修好后它输出：
+
+```
+resolved remote cwd: /workspaces/app.ckarefulon.main
+--- read README.md ---   ->  "# Ckarefulon · Android 壳工程"
+--- glob "*.json" ---    ->  200 条
+--- grep "capacitor" --- ->  15 条
+--- bash ls ---          ->  android / app.config.json / …
+```
+
+`check` 202 → **230 项**，其中 28 项锁住这三处；每处都反向验证过牙齿：把
+`buildTarget` 改回 `record?.path` → 4 项红；把 stat 分隔符改回 `\t` → 2 项红；去掉
+`command -v rg` 分支 → 1 项红（且报错里能直接看到那条残缺命令）。
 
 ## 已知限制
 

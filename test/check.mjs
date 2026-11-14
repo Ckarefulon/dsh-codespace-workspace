@@ -570,8 +570,86 @@ if (!ensurePeers()) {
     dispose()
   }
 
+  section('remote working directory')
+
+  const { buildTarget } = await load('../lib/host/session.js')
+  /** Temp profile homes this section creates; removed alongside the readiness ones. */
+  const cwdHomes = []
+  const { deriveRemoteCwd, normalizeCodespace } = await load('../lib/host/github.js')
+  const { remoteResolve } = await load('../lib/host/transport.js')
+
+  const ghReady = { gh: { installed: true, authenticated: true, login: 'x', version: '2' } }
+  const placeholder = 'C:\\Users\\someone\\.dsh\\codespaces\\demo-cs'
+
+  eq('the in-container checkout is derived from the repository name',
+    deriveRemoteCwd('Ckarefulon/app.ckarefulon.main'), '/workspaces/app.ckarefulon.main')
+  eq('  -> a bare name works too', deriveRemoteCwd('repo'), '/workspaces/repo')
+  eq('  -> a trailing slash is trimmed', deriveRemoteCwd('owner/repo/'), '/workspaces/repo')
+  eq('  -> an unknown repository yields empty, never "/workspaces/undefined"', deriveRemoteCwd(''), '')
+  eq('  -> a non-string yields empty', deriveRemoteCwd(null), '')
+  eq('  -> a path with no name component yields empty', deriveRemoteCwd('/'), '')
+
+  eq('normalizeCodespace reports the running Codespace sessionPath',
+    normalizeCodespace({ name: 'n', repository: { full_name: 'o/r' }, connection: { sessionPath: '/workspaces/r' } }).remoteCwd,
+    '/workspaces/r')
+  eq('  -> and leaves it empty while stopped (only the API knows then)',
+    normalizeCodespace({ name: 'n', repository: { full_name: 'o/r' } }).remoteCwd, '')
+
+  // The bug this whole section exists for: the record's `path` is the LOCAL
+  // placeholder, and using it as a remote cwd resolves every relative path
+  // against `/`. Teeth: revert buildTarget to `record?.path` and the next two
+  // checks flip.
+  eq('a Windows placeholder path resolves relative paths against "/" (the bug)',
+    remoteResolve(placeholder, 'README.md'), '/README.md')
+  eq('a POSIX checkout path resolves them correctly',
+    remoteResolve('/workspaces/app.ckarefulon.main', 'README.md'), '/workspaces/app.ckarefulon.main/README.md')
+
+  eq('buildTarget prefers the resolved remote cwd',
+    buildTarget(ghReady, {}, { name: 'demo-cs', path: placeholder, remoteCwd: '/workspaces/app.main' }).cwd,
+    '/workspaces/app.main')
+  eq('  -> it never falls back to the placeholder path',
+    buildTarget(ghReady, {}, { name: 'demo-cs', path: placeholder }).cwd, '/')
+  eq('  -> a non-absolute remoteCwd is rejected the same way',
+    buildTarget(ghReady, {}, { name: 'demo-cs', path: placeholder, remoteCwd: 'C:\\x' }).cwd, '/')
+  eq('the ssh transport gets the same cwd',
+    buildTarget({ gh: { installed: false } }, { sshKeyPath: 'cs-demo' }, { name: 'demo-cs', path: placeholder, remoteCwd: '/workspaces/app.main' }).cwd,
+    '/workspaces/app.main')
+
+  // And the manager resolves it from the live Codespace, falling back to the
+  // repository layout for a stopped one.
+  {
+    const { CodespaceManager: CwdManager } = await load('../lib/host/codespaces.js')
+    const home = mkdtempSync(join(tmpdir(), 'cs-cwd-'))
+    cwdHomes.push(home)
+    const manager = new CwdManager({
+      logger: { info: () => {}, warn: () => {} },
+      profileHome: home,
+      getSettings: () => ({ ...shared.SETTINGS_DEFAULTS }),
+    }, {})
+    manager.listCodespaces = async () => ([
+      { name: 'cs-running', repository: 'o/r', state: 'Available', remoteCwd: '/workspaces/r' },
+      { name: 'cs-asleep', repository: 'o/sleeper', state: 'Shutdown', remoteCwd: '' },
+    ])
+    manager.records.set('ws-1', { workspaceId: 'ws-1', name: 'cs-running', title: 'r', path: join(manager.root, 'cs-running'), addedAt: 0 })
+    manager.records.set('ws-2', { workspaceId: 'ws-2', name: 'cs-asleep', title: 's', path: join(manager.root, 'cs-asleep'), addedAt: 0 })
+
+    eq('a running Codespace reports its sessionPath',
+      await manager.remoteCwdFor('ws-1'), '/workspaces/r')
+    eq('a stopped one falls back to the clone layout',
+      await manager.remoteCwdFor('ws-2'), '/workspaces/sleeper')
+    eq('an unmanaged workspace has no remote cwd', await manager.remoteCwdFor('ws-none'), '/')
+
+    // Unreachable GitHub must not lose the workspace: the repository is
+    // remembered from the last successful list call.
+    manager.listCodespaces = async () => { throw new Error('offline') }
+    manager.remoteCwds.clear()
+    eq('an unreachable GitHub still yields a usable path',
+      await manager.remoteCwdFor('ws-1'), '/workspaces/r')
+    manager.dispose()
+  }
+
   /* ---------------------------------------------------------------- *
-   * 5b. The registered definitions must PASS the harness's own schema gate.
+   * 5d. The registered definitions must PASS the harness's own schema gate.
    *
    * This is the bug that made the plugin "not work" in the real GUI: the tool
    * definitions carried authoring shorthand (`required: true` on a property
@@ -1064,8 +1142,112 @@ if (!ensurePeers()) {
   }).then(() => null, (error) => error)
   eq('a sleeping Codespace keeps its own code', asleepError?.code, 'E_REMOTE_NOT_RUNNING')
 
+  /* ---------------------------------------------------------------- *
+   * 5e. The remote stat must actually parse.
+   *
+   * GNU `stat -c` does not interpret backslash escapes (only `--printf`
+   * does), and the format reaches it through a double-quoted shell word, so
+   * `stat -c "%F\t%s\t%Y"` prints one field with literal backslash-t runs.
+   * Splitting on a real tab then found nothing, `remoteStat` returned `null`,
+   * and every caller reads `null` as "the path does not exist" — `read`
+   * answered "not found" for files that were plainly there, while the very
+   * same file read through `remoteReadText` succeeded.
+   *
+   * Captured from the real container (GNU coreutils 9.1):
+   *   stat -c "%F\t%s\t%Y" f  ->  regular file\t10094\t1794644544
+   * ---------------------------------------------------------------- */
+
+  section('remote stat parsing')
+
+  const { remoteStat } = await load('../lib/host/transport.js')
+  const statTarget = { kind: 'gh', codespace: 'cs-stat', cwd: '/' }
+
+  const regularFile = await remoteStat(statTarget, '/tmp/x', {
+    run: async () => ({ stdout: 'regular file|10094|1794644544\n', stderr: '', exitCode: 0 }),
+  })
+  eq('a pipe-separated regular file parses', JSON.stringify(regularFile),
+    JSON.stringify({ type: 'file', size: 10094, mtimeMs: 1794644544000 }))
+
+  const directory = await remoteStat(statTarget, '/tmp/x', {
+    run: async () => ({ stdout: 'directory|4096|1794644544\n', stderr: '', exitCode: 0 }),
+  })
+  eq('  -> a directory is recognized', directory?.type, 'dir')
+
+  const literalTabs = await remoteStat(statTarget, '/tmp/x', {
+    // Exactly what the old `\t` format produced on GNU stat.
+    run: async () => ({ stdout: 'regular file\\t10094\\t1794644544\n', stderr: '', exitCode: 0 }),
+  })
+  eq('the old backslash-t shape yields null (which callers read as "missing")', literalTabs, null)
+
+  const missing = await remoteStat(statTarget, '/tmp/x', {
+    run: async () => ({ stdout: 'DSH_MISSING\n', stderr: '', exitCode: 0 }),
+  })
+  eq('DSH_MISSING is reported as absent', missing, null)
+
+  const failed = await remoteStat(statTarget, '/tmp/x', {
+    run: async () => ({ stdout: '', stderr: 'boom', exitCode: 2 }),
+  })
+  eq('a failed stat is absent, not a throw', failed, null)
+
+  const { shq: shqForStat } = await load('../lib/host/gh.js')
+  const builtForStat = shqForStat('/tmp/x')
+  check(builtForStat.startsWith("'") && builtForStat.endsWith("'"),
+    'the stat path is quoted', builtForStat)
+
+  /* ---------------------------------------------------------------- *
+   * 5f. Search must not report a false "no matches".
+   *
+   * A stock Codespace image has no `rg`. The old grep command was
+   * `rg … 2>/dev/null | head`, so a missing rg produced empty stdout and exit
+   * 0 — every search answered "(no matches)". Verified in the real container:
+   * `command -v rg` prints nothing there.
+   * ---------------------------------------------------------------- */
+
+  section('remote search fallbacks')
+
+  const { installRemoteTools: installForSearch } = await load('../lib/host/remote-tools.js')
+  const searchCommands = []
+  const searchTools = {
+    view: () => ({ restrictableNames: new Set() }),
+    get: () => undefined,
+    register: (definition) => {
+      searchCommands.push(definition)
+      return () => {}
+    },
+    restrict: () => () => {},
+  }
+  installForSearch({ id: 'search', ctx: {
+    effect: (fn) => { fn(); return () => {} },
+    inject: (_n, cb) => { cb({ tools: searchTools }); return { dispose: () => {} } },
+  } }, {
+    manager: { recordOf: () => ({ path: '/workspaces/app' }), log: () => {} },
+    workspaceId: 'ws-search',
+    target: { kind: 'gh', codespace: 'cs-search', cwd: '/workspaces/app' },
+    localToolNames: [],
+    // Capture the command line each tool builds without touching a network.
+    run: async (_cmd, args) => {
+      searchCommands.push(args[args.length - 1])
+      return { stdout: 'package.json:3:  "name": "x"\n', stderr: '', exitCode: 0 }
+    },
+  })
+
+  const grepTool = searchCommands.find((d) => d.name === 'grep')
+  const globTool = searchCommands.find((d) => d.name === 'glob')
+  check(grepTool !== undefined, 'the grep tool is registered for the search probe')
+  await grepTool.execute({ pattern: 'name', include: '*.json' }, {})
+  await globTool.execute({ pattern: '**/*.json' }, {})
+
+  const grepCommand = searchCommands.find((c) => typeof c === 'string' && c.includes('grep'))
+  const globCommand = searchCommands.find((c) => typeof c === 'string' && c.includes('find . -type f'))
+  check(grepCommand !== undefined && grepCommand.includes('command -v rg'),
+    'grep branches on whether rg exists', grepCommand)
+  check(grepCommand !== undefined && grepCommand.includes('grep -rEn'),
+    '  -> and falls back to a recursive grep', grepCommand)
+  check(globCommand !== undefined && globCommand.includes('|| true'),
+    'glob tolerates an unreadable subdirectory', globCommand)
+
   // The readiness fakes each made a throwaway profile home.
-  for (const home of roots) {
+  for (const home of [...roots, ...cwdHomes]) {
     try { rmSync(home, { recursive: true, force: true }) } catch { /* best effort */ }
   }
 }
