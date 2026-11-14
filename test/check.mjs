@@ -112,7 +112,7 @@ check(pkg.dsh?.engines?.dsh !== undefined, 'dsh.engines.dsh is declared')
 // Every file the manifest POINTS AT must survive packaging.
 //
 // `files` is the npm/pnpm pack whitelist, and the profile installs this package
-// from a GitHub tarball — which applies that whitelist. `icon.svg` was missing
+// from a GitHub tarball 鈥?which applies that whitelist. `icon.svg` was missing
 // from it while `"icon": "./icon.svg"` still pointed at it, so the installed copy
 // had no icon and DSH reported
 // `ENOENT ... lstat '.../dsh-codespace-workspace/icon.svg'` when reading plugin
@@ -282,8 +282,8 @@ if (!ensurePeers()) {
   /*
    * The PREFERRED carrier is the connection's Fetch registry, and the reason is
    * security, not convenience: DSH's own `/api` prefix route serves that
-   * registry, and its handler calls `connection.admit(req)` — the Host/Origin
-   * fence AND the browser-auth cookie check — before dispatching to any
+   * registry, and its handler calls `connection.admit(req)` 鈥?the Host/Origin
+   * fence AND the browser-auth cookie check 鈥?before dispatching to any
    * registered Fetch route. Registering here inherits the harness policy.
    *
    * A `webServer` exact route on the same path is matched BEFORE the `/api`
@@ -339,7 +339,7 @@ if (!ensurePeers()) {
    * Drive the registered HTTP handler.
    *
    * The route reads its body with `for await (const chunk of req)`, so the stub
-   * must be a real async iterable — an EventEmitter-shaped `on('data')` stub
+   * must be a real async iterable 鈥?an EventEmitter-shaped `on('data')` stub
    * silently yields an EMPTY body, which looks exactly like a bad action.
    */
   function drive({ method = 'POST', remoteAddress = '127.0.0.1', host = '127.0.0.1:19387', origin = 'http://127.0.0.1:19387', type = 'application/json', body = {}, dropOrigin = false, secFetchSite } = {}) {
@@ -571,6 +571,201 @@ if (!ensurePeers()) {
   }
 
   /* ---------------------------------------------------------------- *
+   * 5b. The registered definitions must PASS the harness's own schema gate.
+   *
+   * This is the bug that made the plugin "not work" in the real GUI: the tool
+   * definitions carried authoring shorthand (`required: true` on a property
+   * node) but `tools.register()` takes a REGISTRY-READY raw JSON Schema and
+   * runs `assertSupportedJsonSchema()` on it. Every registration threw, the
+   * per-tool catch swallowed it into a single `warn`, and the agent silently
+   * kept its LOCAL tools while the prompt said it was in the cloud.
+   *
+   * The gate below is a faithful miniature of
+   * `@deepseek-ai/dsh-tools`' `assertSupportedJsonSchema` (the plugin cannot
+   * import the real one: it is not a dependency and does not resolve from the
+   * installed package). Teeth: reverting to `tools.register(definition)`
+   * (bypassing `registryDefinition`) turns every case here red.
+   * ---------------------------------------------------------------- */
+
+  section('registered tool schemas pass the registry gate')
+
+  const { registryDefinition, registrySchema, parameterSchema } = await load('../lib/host/schema.js')
+
+  /**
+   * The supported keyword subset, and which node types each keyword belongs to.
+   * Mirrors `SCHEMA_TYPES` + `allowedFor` in the harness's json-schema module.
+   */
+  const SCHEMA_TYPES = ['object', 'array', 'string', 'number', 'integer', 'boolean', 'null']
+  const ALLOWED_FOR = {
+    properties: ['object'],
+    required: ['object'],
+    additionalProperties: ['object'],
+    items: ['array'],
+    enum: ['string', 'number', 'integer', 'boolean', 'null'],
+    const: ['string', 'number', 'integer', 'boolean', 'null'],
+  }
+  const ANNOTATIONS = new Set(['description', 'title', 'default', 'examples', '$comment'])
+  const ONE_OF_SIBLINGS = ['properties', 'required', 'additionalProperties', 'items', 'enum', 'const']
+
+  /**
+   * Collect every violation the harness gate would report for one schema.
+   *
+   * @param {unknown} schema - candidate raw JSON Schema.
+   * @returns {string[]} violations; empty means the registry would accept it.
+   */
+  function gateViolations(schema) {
+    const violations = []
+    const walk = (node, path) => {
+      if (node === null || typeof node !== 'object' || Array.isArray(node)) {
+        violations.push(`${path} must be a schema object`)
+        return
+      }
+      for (const key of Object.keys(node)) {
+        if (['type', 'oneOf', 'properties', 'required', 'additionalProperties', 'items', 'enum', 'const'].includes(key)) continue
+        if (ANNOTATIONS.has(key)) continue
+        violations.push(`${path}.${key} is not a supported keyword`)
+      }
+      const hasType = Object.hasOwn(node, 'type')
+      const hasOneOf = Object.hasOwn(node, 'oneOf')
+      if (hasType && hasOneOf) {
+        violations.push(`${path} cannot declare both type and oneOf`)
+        return
+      }
+      if (!hasType && !hasOneOf) {
+        for (const key of ONE_OF_SIBLINGS) {
+          if (Object.hasOwn(node, key)) violations.push(`${path}.${key} requires type or oneOf`)
+        }
+        return
+      }
+      if (hasOneOf) {
+        if (!Array.isArray(node.oneOf) || node.oneOf.length < 2) violations.push(`${path}.oneOf must have at least two schemas`)
+        else node.oneOf.forEach((member, index) => walk(member, `${path}.oneOf[${index}]`))
+        return
+      }
+      const type = node.type
+      if (typeof type !== 'string' || !SCHEMA_TYPES.includes(type)) {
+        violations.push(`${path}.type must be one of ${SCHEMA_TYPES.join('/')}`)
+        return
+      }
+      for (const [key, types] of Object.entries(ALLOWED_FOR)) {
+        if (Object.hasOwn(node, key) && !types.includes(type)) {
+          violations.push(`${path}.${key} is not supported on type "${type}"`)
+        }
+      }
+      if (type === 'object') {
+        if (Object.hasOwn(node, 'required')) {
+          const required = node.required
+          if (!Array.isArray(required) || required.some((name) => typeof name !== 'string')) {
+            violations.push(`${path}.required must be an array of strings`)
+          }
+        }
+        if (Object.hasOwn(node, 'properties')) {
+          if (node.properties === null || typeof node.properties !== 'object' || Array.isArray(node.properties)) {
+            violations.push(`${path}.properties must be an object of schemas`)
+          } else {
+            for (const [name, child] of Object.entries(node.properties)) walk(child, `${path}.properties.${name}`)
+          }
+        }
+        // Every name in `required` must actually be declared.
+        if (Array.isArray(node.required) && node.properties !== undefined) {
+          for (const name of node.required) {
+            if (!Object.hasOwn(node.properties, name)) {
+              violations.push(`${path}.required names undeclared property "${name}"`)
+            }
+          }
+        }
+      }
+      if (type === 'array' && Object.hasOwn(node, 'items')) walk(node.items, `${path}.items`)
+      if (Object.hasOwn(node, 'enum') && (!Array.isArray(node.enum) || node.enum.length === 0)) {
+        violations.push(`${path}.enum must be a non-empty array`)
+      }
+    }
+    walk(schema, 'schema')
+    return violations
+  }
+
+  // The gate itself has teeth: the OLD shape (property-level `required`) is
+  // rejected, and the new one is accepted. If this ever stops failing, the
+  // cases below stop proving anything.
+  check(gateViolations({ type: 'object', properties: { a: { type: 'string', required: true } } }).length > 0,
+    'the replica gate rejects a property-level `required` (mirrors the real one)')
+  eq('  -> and accepts the object-level form',
+    JSON.stringify(gateViolations({ type: 'object', properties: { a: { type: 'string' } }, required: ['a'] })), '[]')
+
+  eq('registrySchema lifts a property-level required to the object level',
+    JSON.stringify(registrySchema({ type: 'object', properties: { a: { type: 'string', required: true }, b: { type: 'string' } } })),
+    JSON.stringify({ type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, required: ['a'] }))
+  eq('  -> and omits `required` entirely when nothing is required',
+    JSON.stringify(registrySchema({ type: 'object', properties: { a: { type: 'string' } } })),
+    JSON.stringify({ type: 'object', properties: { a: { type: 'string' } } }))
+  eq('registrySchema recurses into array items and drops `required` beside oneOf',
+    JSON.stringify(registrySchema({
+      type: 'object',
+      properties: {
+        before: { required: true, oneOf: [{ type: 'string' }, { type: 'null' }] },
+        list: { type: 'array', items: { type: 'object', properties: { id: { type: 'integer', required: true } } } },
+      },
+    })),
+    JSON.stringify({
+      type: 'object',
+      properties: {
+        before: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+        list: { type: 'array', items: { type: 'object', properties: { id: { type: 'integer' } }, required: ['id'] } },
+      },
+      required: ['before'],
+    }))
+  eq('parameterSchema builds the implicit object root the wire expects',
+    JSON.stringify(parameterSchema({ file_path: { type: 'string', required: true }, limit: { type: 'number' } })),
+    JSON.stringify({ type: 'object', properties: { file_path: { type: 'string' }, limit: { type: 'number' } }, required: ['file_path'] }))
+
+  // Now the real thing: install the surface into a fake registry that applies
+  // the gate exactly as `ToolsService.register()` does, and require ZERO
+  // violations 鈥?not "at most a warn".
+  {
+    const accepted = []
+    const rejected = []
+    const gatedTools = {
+      view: () => ({ restrictableNames: new Set(['read', 'write', 'edit', 'glob', 'grep', 'bash', 'pwsh', 'read_image']) }),
+      get: (name) => (['read', 'write', 'edit', 'glob', 'grep', 'bash', 'pwsh', 'read_image'].includes(name) ? { name } : undefined),
+      register: (definition) => {
+        if (definition.output === undefined || typeof definition.output.render !== 'function') {
+          rejected.push(`${definition.name}: missing output.render`)
+          throw new TypeError(`tool "${definition.name}" must declare output { schema, render }`)
+        }
+        // This is the line the plugin used to lose on, in the real harness.
+        const violations = gateViolations(definition.output.schema)
+        if (violations.length > 0) {
+          rejected.push(`${definition.name}: ${violations.join('; ')}`)
+          throw new Error(`unsupported JSON schema: ${violations.join('; ')}`)
+        }
+        // `parameters` is projected to the model verbatim; it must already be
+        // a raw schema, not the authoring map.
+        if (definition.parameters?.type !== 'object' || definition.parameters?.properties === undefined) {
+          rejected.push(`${definition.name}: parameters are not a raw object schema`)
+          throw new Error('parameters must be a raw object schema')
+        }
+        accepted.push(definition.name)
+        return () => {}
+      },
+      restrict: () => () => {},
+    }
+    const agentCtx = {
+      effect: (fn) => { fn(); return () => {} },
+      inject: (_names, cb) => { cb({ tools: gatedTools }); return { dispose: () => {} } },
+    }
+    const warnings = []
+    installRemoteTools({ id: 'agent-gate', ctx: agentCtx }, {
+      manager: { recordOf: () => ({ path: '/workspace' }), log: (level, message) => warnings.push(`${level}: ${message}`) },
+      workspaceId: 'ws-gate',
+      target: { kind: 'gh', codespace: 'cs', cwd: '/workspace' },
+      localToolNames: ['read', 'write', 'edit', 'glob', 'grep', 'bash', 'pwsh', 'read_image'],
+    })
+    eq('every remote tool passes the registry gate', accepted.join(','), 'read,write,edit,glob,grep,bash')
+    eq('  -> and none was rejected', JSON.stringify(rejected), '[]')
+    eq('  -> and no warning was logged', JSON.stringify(warnings), '[]')
+  }
+
+  /* ---------------------------------------------------------------- *
    * 6. Workspace naming.
    * ---------------------------------------------------------------- */
 
@@ -616,7 +811,7 @@ if (!ensurePeers()) {
    * `states` is what `listCodespaces` reports on successive calls; the LAST value
    * repeats forever, which is how the timeout case is expressed. Each listing
    * advances the sequence and `start` does not, because it is the listing that
-   * observes a state — a real `start` changes GitHub's state, not our cursor.
+   * observes a state 鈥?a real `start` changes GitHub's state, not our cursor.
    *
    * @param {string[]} states - the state sequence.
    * @param {{missing?: boolean, startFails?: boolean, listFails?: boolean}} [options] - failure switches.
@@ -783,7 +978,7 @@ if (!ensurePeers()) {
     await gate({ agent: { session: { header: { cwd: '/cloud' } } }, signal: controller.signal }, next)
     eq('a Codespace session asks for readiness', gateCalls.length, 1)
     eq('  -> for the right workspace', gateCalls[0].id, 'ws-1')
-    check(gateCalls[0].signal === controller.signal, '  -> forwarding the turn’s abort signal')
+    check(gateCalls[0].signal === controller.signal, '  -> forwarding the turn鈥檚 abort signal')
     eq('  -> and the decision chain still runs', passed, before + 1)
 
     // A failure inside the gate must not break the turn.
@@ -809,6 +1004,65 @@ if (!ensurePeers()) {
   eq('a backtick cannot break out', shq('`whoami`'), "'`whoami`'")
   eq('a dollar sign cannot expand', shq('$HOME'), "'$HOME'")
   eq('an empty string still quotes', shq(''), "''")
+
+  /* ---------------------------------------------------------------- *
+   * 5c. Classification of `gh codespace ssh` failures.
+   *
+   * Two very different situations look identical on the wire — exit code -1
+   * with a stderr paragraph — and they need OPPOSITE advice:
+   *   · the Codespace is asleep        -> press Start
+   *   · the container has no sshd      -> edit devcontainer.json and rebuild
+   * Telling a user to "start" a running Codespace sends them in a circle, so
+   * the two predicates must not overlap.
+   *
+   * Real stderr of the second case, captured from gh 2.102.0 against a Java
+   * devcontainer built from a custom Dockerfile: the RPC detail is EMPTY and
+   * only gh's generic advice follows the header.
+   * ---------------------------------------------------------------- */
+
+  section('gh failure classification')
+
+  const { isNotRunning, needsSSHServer } = await load('../lib/host/gh.js')
+  check(typeof needsSSHServer === 'function', 'needsSSHServer is exported')
+
+  const noSSHDOutput = {
+    exitCode: -1,
+    stderr: 'error getting ssh server details: failed to start SSH server: \n'
+      + 'Please check if an SSH server is installed in the container.\n'
+      + 'If the docker image being used for the codespace does not have an SSH server,\n'
+      + 'install it in your Dockerfile or, for codespaces that use Debian-based images,\n'
+      + 'you can add the following to your devcontainer.json:\n\n'
+      + '"features": { "ghcr.io/devcontainers/features/sshd:1": { "version": "latest" } }\n',
+  }
+  const asleepOutput = {
+    exitCode: -1,
+    stderr: 'error: codespace is not running, please start the codespace and try again',
+  }
+
+  check(needsSSHServer(noSSHDOutput), 'an sshd-less container is classified as such')
+  check(!isNotRunning(noSSHDOutput), '  -> and NOT as "not running" (a running box would send the user in a circle)')
+  check(isNotRunning(asleepOutput), 'a stopped Codespace is classified as not running')
+  check(!needsSSHServer(asleepOutput), '  -> and NOT as "no sshd"')
+  check(!needsSSHServer({ stderr: '' }), 'an unrelated failure matches neither')
+  check(!needsSSHServer({}), 'a result without stderr matches neither')
+
+  const { remoteExec } = await load('../lib/host/transport.js')
+  const ghTarget = { kind: 'gh', codespace: 'cs-no-sshd', cwd: '/workspace' }
+
+  const noSSHDError = await remoteExec(ghTarget, 'true', {
+    run: async () => ({ ...noSSHDOutput }),
+  }).then(() => null, (error) => error)
+  check(noSSHDError !== null, 'a no-sshd transport failure is surfaced, not swallowed')
+  eq('  -> with its own actionable code', noSSHDError?.code, 'E_REMOTE_NO_SSHD')
+  check(noSSHDError?.message.includes('features') === true,
+    '  -> the message names the devcontainer feature that fixes it', noSSHDError?.message)
+  check(noSSHDError?.message.includes('rebuild') === true,
+    '  -> and says the Codespace has to be rebuilt', noSSHDError?.message)
+
+  const asleepError = await remoteExec(ghTarget, 'true', {
+    run: async () => ({ ...asleepOutput }),
+  }).then(() => null, (error) => error)
+  eq('a sleeping Codespace keeps its own code', asleepError?.code, 'E_REMOTE_NOT_RUNNING')
 
   // The readiness fakes each made a throwaway profile home.
   for (const home of roots) {
@@ -890,7 +1144,7 @@ const HOST_SUPPLIED = new Set(['nav'])
 const unusedKeys = zhKeys.filter((key) => {
   if (HOST_SUPPLIED.has(key)) return false
   if (clientSource.includes(`'${key}'`)) return false
-  // Dynamic keys: t('prefix.' + value) — the literal prefix is what to look for.
+  // Dynamic keys: t('prefix.' + value) 鈥?the literal prefix is what to look for.
   const dot = key.lastIndexOf('.')
   if (dot > 0 && clientSource.includes(`'${key.slice(0, dot + 1)}`)) return false
   return true
@@ -900,7 +1154,7 @@ check(unusedKeys.length === 0, 'the locale has no keys the client never reads', 
 // The client bundle carries its OWN copy of both dictionaries, used when no
 // `locale` service is present (the browser harness runs that way). Nothing above
 // compares those two copies against `locale/*.json`, so a key added to only one
-// side ships a literal `row.hoverRepo` to the user — which is exactly what
+// side ships a literal `row.hoverRepo` to the user 鈥?which is exactly what
 // happened once. Extract both inline tables and require them to match the JSON.
 {
   const inlineTables = [...clientSource.matchAll(/MESSAGES_(ZH|EN) = \{([\s\S]*?)\n    \}/g)]
@@ -920,8 +1174,7 @@ check(unusedKeys.length === 0, 'the locale has no keys the client never reads', 
 
 } finally {
   // Remove the junction WITHOUT recursing. `rmSync(..., {recursive:true})` on a
-  // Windows directory junction follows it and deletes the TARGET's contents —
-  // which here is the user's live DSH profile. `rmdirSync` unlinks the junction
+  // Windows directory junction follows it and deletes the TARGET's contents 鈥?  // which here is the user's live DSH profile. `rmdirSync` unlinks the junction
   // itself and leaves the target untouched, which is the only safe way to undo
   // this. The parent is then removed only if it is empty.
   if (createdLink) {

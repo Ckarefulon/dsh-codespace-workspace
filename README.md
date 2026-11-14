@@ -116,11 +116,38 @@ Agent 拥有完整的 `git` 命令执行能力。**插件不干预 Git 操作，
 | `ssh` | 是 | 连接 Codespace 的数据通道 |
 | `gh`（GitHub CLI） | 推荐 | 用于 `gh codespace ssh`；**未安装时插件仍可用**，改用你在设置里配置的 SSH 别名 |
 | GitHub token | 是 | 控制面（REST API）。取值顺序：设置 → `GITHUB_TOKEN` → `gh auth token` |
-
-> **本机现状**：`gh` 未安装，`git` 与 `ssh` 已安装。插件会在设置页明确显示这一
-> 状态，并在缺少 `gh` 时回退到 SSH 别名，而不是直接失败。
+| **容器里有 `sshd`** | **是** | 见下节。自定义 Dockerfile 的仓库默认**没有**，插件会明确报 `E_REMOTE_NO_SSHD` |
 
 所需 GitHub 权限范围：`codespace`、`repo`。
+
+### 容器必须自带 SSH 服务（否则数据面根本走不通）
+
+`gh codespace ssh` 不是「在容器外连一下」，它会在容器**内部**启动一个 sshd 再通过
+dev tunnel 转发过来。因此容器镜像里没有 sshd，就是一条硬性的死路——控制面（列
+Codespace、启停、看状态）全都正常，但读写文件、跑命令没有任何一条能成功。
+
+GitHub 官方文档把这条边界写得很清楚：**默认 dev container 镜像自带并自动启动
+sshd；用自定义 Dockerfile（或任何非默认镜像）的仓库不会**，需要在
+`devcontainer.json` 的 `features` 里自己加。
+
+```jsonc
+// .devcontainer/devcontainer.json
+"features": {
+  "ghcr.io/devcontainers/features/sshd:1": { "version": "latest" }
+}
+```
+
+加完必须**删掉 Codespace 重建**：`features` 在创建时烘进容器，改完不会补装到
+已有实例上。
+
+插件对这个故障有专门的错误码 `E_REMOTE_NO_SSHD`（与「Codespace 睡着了」的
+`E_REMOTE_NOT_RUNNING` 分开），因为两者的处置完全相反：一个是改仓库重建，另一个
+是点一下 Start。判据在 `lib/host/gh.js` 的 `needsSSHServer()`。
+
+> **本机现状**：`gh` 已安装并登录；`git` 与 `ssh` 已安装。`app.ckarefulon.main`
+> 目前**没有** sshd（`.devcontainer/Dockerfile` 基于
+> `mcr.microsoft.com/devcontainers/java:1-21-bookworm`，没有装 openssh-server），
+> 所以那个仓库的云端工作区在补上这条 feature 之前不可用。
 
 ## 安装
 
@@ -178,6 +205,7 @@ lib/
     codespaces.js        生命周期、机器规格、prebuild、空仓库、自动暂停计时器
     transport.js         远程执行与文件读写（base64，无字符串插值）
     remote-tools.js      为 Codespace 会话注册远程工具（agent.ctx 作用域）
+    schema.js            把速记 schema 编译成注册表就绪的原生 JSON Schema
     session.js           agent/created、提示词注入、倒计时、退出停止
     routes.js            RPC 路由
   client.js              浏览器半边：设置页 + DOM 增强（标题栏按钮 / 行 / 菜单）+ 多步窗口
@@ -693,6 +721,88 @@ DSH 自己的 `archived-session-gate` 用的是同一个钩子 —— 但它是*
 行为），浏览器套件 203 → **217 项**。三处都反向验证过牙齿：不启动机器 + 把过渡态当成就绪
 → 6 项变红；给云朵加回颜色 + 让 `busy` 重新驱动转圈 → 8 项变红。
 
+**十四、注册表把每个远程工具都拒了 —— 于是「云端会话」用的还是本地工具（2026-11-14）**
+
+用户的原话是「还是用不了」。这次抓到的不是一个，而是两个叠在一起的故障；第一个是
+插件自身的缺陷，第二个是被它掩盖掉的数据面前提。
+
+**（一）`tools.register()` 的 schema 网关把六个工具全拒绝了**
+
+第十条修的是「工具根本没走到注册这一步」。走到之后才发现：**注册本身是失败的**。
+`remote-tools.js` 把作者速记（`defineTool()` 那种写法）直接交给了 `register()`，而
+`register()` 收的是**注册表就绪的原生 JSON Schema**，它会先跑
+`assertSupportedJsonSchema()`：
+
+```js
+// @deepseek-ai/dsh-tools lib/index.js:434-438
+if (output === void 0 || typeof output.render !== 'function') throw new TypeError(...)
+assertSupportedJsonSchema(output.schema)      // ← 就死在这行
+```
+
+具体拒的是什么，把真实模块拉起来跑一遍最清楚（下为实测输出）：
+
+```
+cannot register remote tool read: unsupported JSON schema:
+  schema.properties.path.required is not supported on type "string";
+  schema.properties.offset.required is not supported on type "integer";
+  schema.properties.lines.required is not supported on type "array"; …
+cannot register remote tool write: … schema.properties.before.required is not supported beside oneOf …
+```
+
+也就是说 `required: true` 写在**属性节点**上是速记，原生 JSON Schema 里 `required`
+是**对象节点上的字符串数组**（`required: ['path','offset']`）。六个工具**全部**被拒，
+每一个都被外层 `try/catch` 收成一条 `warn` —— 于是现象和第十条一模一样却更难查：
+**agent 手上仍然是本地的 `read`/`glob`/`pwsh`，提示词说在云端，日志里连个 error 都没有。**
+
+修法是新增 `lib/host/schema.js`，在交给注册表之前把速记编译成原生形态：
+
+- `registrySchema()`：把属性节点上的 `required: true` 提升到父对象的 `required` 数组，
+  递归进 `properties` / `items` / `oneOf`；`oneOf` 旁边不允许出现 `required`，直接删掉。
+- `parameterSchema()`：把 `parameters` 那个**属性映射**包成 `{ type:'object', properties, required }`。
+  这一点同样致命，只是不报错——`parameters` 会被原样投影给模型，不包就变成一个没有
+  `type` 的怪对象。
+- `registryDefinition()`：把两者合起来，`register()` 只吃它的产物。
+
+**这一条最该记住的不是修法，而是「为什么 181 项测试全绿却完全没用」**：自测里的
+假 `tools.register()` 只是把 `definition.name` 塞进数组，**根本不校验 schema**，
+所以它对真实注册表的拒收完全无感。现在的测法是照抄那道网关（`SCHEMA_TYPES` 与
+`allowedFor` 逐条对应 `dsh-tools` 的 json-schema 模块），并额外验证**网关本身有牙齿**：
+旧形态必须被拒、新形态必须通过。把 `register(registryDefinition(…))` 退回成
+`register(definition)`，立刻 3 项变红，报的正是上面那段字。
+
+`check` 181 → **190 项**。
+
+**（二）（一）修好之后立刻撞上的第二堵墙：容器里没有 sshd**
+
+数据面走 `gh codespace ssh`，而它**不是**「从外面连进去」：它在容器**内部**拉起一个
+sshd，再经 dev tunnel 转发。实测（gh 2.102.0）：
+
+```
+$ gh codespace ssh -c psychic-goggles-7v9974jwpwr5fpqxq -- sh -lc 'echo OK'
+error getting ssh server details: failed to start SSH server:
+Please check if an SSH server is installed in the container. …
+```
+
+`app.ckarefulon.main` 的 `.devcontainer/Dockerfile` 是
+`FROM mcr.microsoft.com/devcontainers/java:1-21-bookworm`，**没有装 openssh-server**。
+GitHub 文档的口径是：默认 dev container 镜像自带并自动启动 sshd，**自定义 Dockerfile
+的仓库没有**，要在 `devcontainer.json` 的 `features` 里加
+`"ghcr.io/devcontainers/features/sshd:1": {}`，并且**删掉重建**才生效。
+
+对照组也做了，用同一台机器、同一套 `gh`：在**没有 `.devcontainer`** 的仓库上建一个
+干净 Codespace，`gh codespace ssh -c … -- sh -lc 'echo OK'` 8 秒返回、
+`pwd` 是 `/home/codespace`、`/usr/sbin/sshd` 存在。**所以数据面本身没问题，缺 sshd
+是那个仓库镜像的属性**，光改插件绕不过去。
+
+插件这一侧能做的、也已经做了的是**别再让人猜**：`gh.js` 新增 `needsSSHServer()`，
+与 `isNotRunning()` 严格分开（前者要改仓库重建，后者点一下 Start——给错建议等于让
+用户原地转圈），并抛专门的 `E_REMOTE_NO_SSHD`，消息里直接写明要加哪条 feature、
+要重建 Codespace。`check` 190 → **202 项**，其中 8 项专测这两个判据不重叠。
+
+**小结这一条**：插件缺陷已修（并有用例守住），但 `app.ckarefulon.main` 这个仓库要能用
+云端工作区，**中间必须补 `.devcontainer/devcontainer.json` 的 sshd feature 并重建
+Codespace**——那是仓库的改动，不是插件的。
+
 ## 已知限制
 
 - **工作区分组标题栏的图标行、以及工作区行，都没有官方插槽**。DSH 把「添加工作区」
@@ -727,6 +837,14 @@ DSH 自己的 `archived-session-gate` 用的是同一个钩子 —— 但它是*
   `test/live.mjs` 用 `gh` 的令牌打真实 GitHub API，`getViewer` / `listRepos` /
   `listCodespaces` 都通（本机 18 个仓库、0 个 Codespace）。命令拼装也已用真实 bash
   验证：20 组逐字节往返 + 5 组注入载荷，均保持为单个 shell 词且无副作用。
+
+  **2026-11-14 更新**：`gh codespace ssh` 的失败形态已实测到手（gh 2.102.0）：
+  容器的镜像没有 sshd 时，`gh` 的 stderr 只有 `error getting ssh server details:
+  failed to start SSH server:` 加一段通用建议，**RPC 的 detail 是空的**。因此
+  `needsSSHServer()` 只按这段文本判，不指望有更具体的错误串。同时确认了一条对照：
+  用默认镜像（无 `.devcontainer`）建的干净 Codespace，`gh codespace ssh -c … --
+  sh -lc 'echo OK'` 8 秒内返回、`/usr/sbin/sshd` 存在——即「数据面本身没问题，
+  缺 sshd 是仓库镜像的属性」。
 
   **「退出即停」不在此列**：它的逻辑已按上面的 `test/shutdown.mjs` 实测（并发、
   不 reject、5 秒预算内、幂等、pending 落盘）。仍然未经实测的只有「真实 GitHub
