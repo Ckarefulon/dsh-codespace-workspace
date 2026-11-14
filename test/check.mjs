@@ -1157,6 +1157,76 @@ if (!ensurePeers()) {
    *   stat -c "%F\t%s\t%Y" f  ->  regular file\t10094\t1794644544
    * ---------------------------------------------------------------- */
 
+  /* ---------------------------------------------------------------- *
+   * 5e-bis. The data plane must not depend on a caller remembering `run`.
+   *
+   * `remoteExec`'s `gh` branch used to THROW `E_REMOTE_TARGET: the gh
+   * transport requires an injected executor` whenever `run` was absent, while
+   * `ghInfo()` and `CodespaceManager` both defaulted to `defaultRun`. That
+   * asymmetry shipped in 0.1.3: `lib/index.js` called
+   * `installSessionWiring(ctx, manager, { getSettings })` without forwarding
+   * `run`, so all six remote tools registered perfectly and then EVERY single
+   * call failed. The control plane (status/start/stop) stayed green, so nothing
+   * looked broken until a model actually touched a file.
+   *
+   * Two directions are asserted:
+   *   a. the transport invents the process executor when none is injected,
+   *   b. `lib/index.js` still forwards the manager's executor.
+   * ---------------------------------------------------------------- */
+
+  section('executor wiring')
+
+  {
+    const { remoteExec } = await import(new URL('../lib/host/transport.js', import.meta.url))
+
+    // (a) No `run` at all: the call must get PAST the executor check. `gh` may
+    // not be installed and the Codespace may not exist, so the assertion is on
+    // the failure KIND, never on success: anything but E_REMOTE_TARGET proves
+    // an executor was resolved.
+    let kind = 'resolved'
+    let message = ''
+    try {
+      const result = await remoteExec(
+        { kind: 'gh', codespace: 'dsh-nonexistent-probe', cwd: '/' },
+        'echo hi',
+        { timeoutMs: 5000 },
+      )
+      kind = result.exitCode === 0 ? 'ran' : `exit ${result.exitCode}`
+      message = result.stderr ?? ''
+    } catch (error) {
+      kind = error?.code ?? 'threw'
+      message = error?.message ?? ''
+    }
+    check(kind !== 'E_REMOTE_TARGET',
+      'an absent executor defaults to the process runner instead of throwing',
+      `${kind}: ${message}`)
+    check(!/requires an injected executor/.test(message),
+      '  -> the old "requires an injected executor" message is gone', message)
+
+    // A supplied executor must still win, so tests and custom spawners keep
+    // working instead of being silently overridden by the default.
+    let seen = 0
+    const result = await remoteExec(
+      { kind: 'gh', codespace: 'cs-fake', cwd: '/' },
+      'echo hi',
+      { run: async () => { seen += 1; return { stdout: 'hi\n', stderr: '', exitCode: 0 } } },
+    )
+    eq('an injected executor is still used when supplied', seen, 1)
+    eq('  -> and its output is returned', result.stdout, 'hi\n')
+  }
+
+  {
+    // (b) `lib/index.js` must hand the manager's executor to session wiring.
+    // A source assertion is the only cheap way to catch this: the wiring is
+    // built inside `apply()`, which needs a live Cordis context. The regex
+    // tolerates the multi-line object literal the call is written with.
+    const indexSource = readFileSync(resolve(here, '..', 'lib', 'index.js'), 'utf8')
+    const call = indexSource.replace(/\s+/g, ' ')
+    check(/installSessionWiring\([^)]*\{[^}]*\brun\b/.test(call),
+      'lib/index.js forwards `run` into installSessionWiring',
+      indexSource.split('\n').filter((l) => l.includes('installSessionWiring')).join(' | '))
+  }
+
   section('remote stat parsing')
 
   const { remoteStat } = await load('../lib/host/transport.js')
@@ -1227,7 +1297,10 @@ if (!ensurePeers()) {
     // Capture the command line each tool builds without touching a network.
     run: async (_cmd, args) => {
       searchCommands.push(args[args.length - 1])
-      return { stdout: 'package.json:3:  "name": "x"\n', stderr: '', exitCode: 0 }
+      // Records are NUL-separated: `<path>\0<line>:<text>\n`. `grep -Z` and
+      // `rg --null` both emit this, and it is the only delimiter that survives
+      // a matching line containing colons.
+      return { stdout: 'package.json\u00003:  "name": "x"\n', stderr: '', exitCode: 0 }
     },
   })
 
@@ -1245,6 +1318,71 @@ if (!ensurePeers()) {
     '  -> and falls back to a recursive grep', grepCommand)
   check(globCommand !== undefined && globCommand.includes('|| true'),
     'glob tolerates an unreadable subdirectory', globCommand)
+
+  /* ---------------------------------------------------------------- *
+   * 5f-bis. A matching LINE may contain colons.
+   *
+   * The parsed record used to be located by taking the last two colons of the
+   * line. That is correct only when the matched text has none, which is not the
+   * common case in this very repository: the whole point of the search is
+   * usually something like `ghcr.io/devcontainers/features/sshd:1`. Such a
+   * match was parsed as path `.../devcontainer.json:20:    "ghcr.io/.../sshd`
+   * and then DISCARDED because the trailing field was not a number — a silent
+   * false negative on precisely the hits worth finding. Verified live: a
+   * cwd-rooted search for the sshd feature returned 0 matches before the fix
+   * and 3 after.
+   * ---------------------------------------------------------------- */
+
+  section('grep record parsing')
+
+  {
+    const registered = []
+    let captured = ''
+    const tools = {
+      view: () => ({ restrictableNames: new Set() }),
+      get: () => undefined,
+      register: (definition) => { registered.push(definition); return () => {} },
+      restrict: () => () => {},
+    }
+    const { installRemoteTools: installForColon } = await load('../lib/host/remote-tools.js')
+    installForColon({ id: 'colon', ctx: {
+      effect: (fn) => { fn(); return () => {} },
+      inject: (_n, cb) => { cb({ tools }); return { dispose: () => {} } },
+    } }, {
+      manager: { recordOf: () => ({ path: '/workspaces/app' }), log: () => {} },
+      workspaceId: 'ws-colon',
+      target: { kind: 'gh', codespace: 'cs-colon', cwd: '/workspaces/app' },
+      localToolNames: [],
+      run: async (_cmd, args) => {
+        captured = args[args.length - 1]
+        // Three records whose matched TEXT contains colons, in the shapes this
+        // repository actually produces.
+        return {
+          stdout: '.devcontainer/devcontainer.json\u000014:    "sshd:1": {\n'
+            + '.devcontainer/devcontainer.json\u000020:    "ghcr.io/x/sshd:1": {\n'
+            + 'docs/a.md\u00007:url = "https://example.com:8443/x"\n',
+          stderr: '',
+          exitCode: 0,
+        }
+      },
+    })
+
+    const colonGrep = registered.find((d) => d.name === 'grep')
+    check(colonGrep !== undefined, 'the grep tool is registered for the colon probe')
+
+    const parsed = await colonGrep.execute({ pattern: 'sshd' }, {})
+    eq('a line containing colons survives parsing', parsed.matches.length, 3)
+    eq('  -> the path keeps its directory', parsed.matches[0]?.path, '.devcontainer/devcontainer.json')
+    eq('  -> the line number is intact', parsed.matches[0]?.lineNumber, 14)
+    eq('  -> and the text keeps every colon', parsed.matches[1]?.line,
+      '    "ghcr.io/x/sshd:1": {')
+    eq('a URL port in the matched text does not break the record either',
+      parsed.matches[2]?.line, 'url = "https://example.com:8443/x"')
+
+    // The command must ask for NUL-separated records, or none of the above holds.
+    check(captured.includes('--null') && captured.includes('-rEnZ'),
+      'the grep command requests NUL-separated records from both searchers', captured)
+  }
 
   // The readiness fakes each made a throwaway profile home.
   for (const home of [...roots, ...cwdHomes]) {

@@ -884,9 +884,76 @@ resolved remote cwd: /workspaces/app.ckarefulon.main
 --- bash ls ---          ->  android / app.config.json / …
 ```
 
-`check` 202 → **230 项**，其中 28 项锁住这三处；每处都反向验证过牙齿：把
+`check` 202 → **242 项**，其中 35 项锁住下面这些；每处都反向验证过牙齿：把
 `buildTarget` 改回 `record?.path` → 4 项红；把 stat 分隔符改回 `\t` → 2 项红；去掉
-`command -v rg` 分支 → 1 项红（且报错里能直接看到那条残缺命令）。
+`command -v rg` 分支 → 1 项红（且报错里能直接看到那条残缺命令）；把 `remoteExec` 的
+gh 分支改回「必须注入执行器」→ 2 项红；去掉 `index.js` 里的 `run` 透传 → 1 项红；
+把 `grep` 的 NUL 分隔改回按冒号切分 → 6 项红。
+
+### 0.1.4：三个「注册全成功、每次调用全失败」的装配缺陷
+
+**（一）执行器没有传下去，六个远端工具全部 `E_REMOTE_TARGET`**
+
+`remoteExec` 的 `gh` 分支原本写着：
+
+```js
+const run = options.run
+if (typeof run !== 'function') {
+  throw new RemoteError('the gh transport requires an injected executor', 'E_REMOTE_TARGET')
+}
+```
+
+而 `lib/index.js` 调用的是 `installSessionWiring(ctx, manager, { getSettings })`——**没有
+`run`**。于是 `CodespaceManager` 自己兜底出来的 `this.run = defaultRun` 在 session 这一层
+断掉了，六个工具注册得完美无缺，然后**每一次调用都抛同一个错误**。控制面（状态/启停）
+走的是 `ghInfo(run = defaultRun)` 与 manager，全都有默认值，所以它一直绿着——插件看起来
+完全健康。
+
+这条故障形态值得单独记一笔：**它只在模型真的去碰文件时才暴露**。任何「插件是否加载」
+「工具是否注册」层面的检查都通过。
+
+两处都修了：`index.js` 透传 `{ getSettings, run: manager.run }`；同时把 `remoteExec` 的
+默认值补齐成 `typeof options.run === 'function' ? options.run : defaultRun`，与
+`ghInfo`、`CodespaceManager` 对齐。**默认值必须落在 transport 上**，否则下一个调用方
+忘了传还会复现同一个空窗；`run` 现在只是「覆盖」，不再是「必须」。
+
+**（二）`grep` 按最后两个冒号切分，把含冒号的匹配整条丢掉**
+
+```js
+const second = raw.lastIndexOf(':')
+const first = raw.lastIndexOf(':', second - 1)
+```
+
+这条规则只在「匹配正文里没有冒号」时成立，而这个仓库里**到处都是**冒号：
+`ghcr.io/devcontainers/features/sshd:1`、URL 的端口、JSON 的键值。于是
+`./docs/x.md:114:…sshd:1…` 被切成
+`path = "./docs/x.md:114:…/sshd"`、`lineNumber = NaN`，然后 `continue` **丢掉**。
+
+后果比「少几条」更糟：它是**在最有价值的匹配上失效**。实测同一个查询
+（`ghcr.io/devcontainers/features/sshd`）：根目录搜索 **0 条**，子目录搜索勉强 3 条——两者
+本该一致。修法是让分隔符不可能出现在内容里：`grep -rEnZ` / `rg --null` 在文件名后输出
+NUL，再按 `\0` 一次切开，路径与正文各归各位。
+
+**（三）`grep` 的 `rg` 分支把绝对路径又拼了一遍**
+
+`rg -- … <root>` 是在 `cd <root>` 之后跑的，再加一次绝对路径让 `rg` 输出
+`/workspaces/…/x.md` 而不是 `./x.md`，与 `grep` 分支的形态不一致。两分支现在都只搜 `.`。
+
+**这一轮的验证方式**：`test/check.mjs` 从 230 涨到 **242 项**，并且**再次拿真实 Codespace
+跑了一遍**（`gh codespace ssh` 通道，真实容器、真实 `gh`）：
+
+```
+bash    /workspaces/app.ckarefulon.main | main
+read    # Ckarefulon · Android 壳工程
+glob    200 json paths
+grep    3 matches; first = ./docs/Codespaces云端构建.md:114
+grep2   3 matches; paths = ["./devcontainer.json"]
+write   create
+edit    v2
+cat     v2
+```
+
+注意 `grep` 那两行：修复前根目录查询是 **0 条**，现在是 3 条，且与子目录查询自洽。
 
 ## 已知限制
 
