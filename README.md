@@ -884,11 +884,45 @@ resolved remote cwd: /workspaces/app.ckarefulon.main
 --- bash ls ---          ->  android / app.config.json / …
 ```
 
-`check` 202 → **242 项**，其中 35 项锁住下面这些；每处都反向验证过牙齿：把
+`check` 202 → **246 项**，其中 39 项锁住下面这些；每处都反向验证过牙齿：把
 `buildTarget` 改回 `record?.path` → 4 项红；把 stat 分隔符改回 `\t` → 2 项红；去掉
 `command -v rg` 分支 → 1 项红（且报错里能直接看到那条残缺命令）；把 `remoteExec` 的
 gh 分支改回「必须注入执行器」→ 2 项红；去掉 `index.js` 里的 `run` 透传 → 1 项红；
-把 `grep` 的 NUL 分隔改回按冒号切分 → 6 项红。
+把 `grep` 的 NUL 分隔改回按冒号切分 → 6 项红；去掉两个 `--hidden` → 2 项红。
+
+### 0.1.5：装上 `rg` 之后，搜索结果反而变少了
+
+0.1.4 让两个分支都不再静默失败，但两个分支**回答的范围本来就不一样**：
+
+| | `rg` | `grep -r` |
+|---|---|---|
+| 隐藏目录（`.devcontainer/`、`.github/`） | **默认跳过** | 会进去 |
+| `.gitignore` 排除的文件 | 默认跳过 | 会进去 |
+
+`rg` 一旦可用了，走的就是「跳过」那一边，于是同一个查询的答案**变短**。实测同一个
+仓库、同一个 pattern：
+
+```
+rg --files -g '*.json'          ->  5 条   ← 少了 .devcontainer/devcontainer.json
+rg --hidden --files -g '*.json' ->  6 条
+```
+
+这不是「少几条」的问题：被吞掉的恰好是决定这个 Codespace 能不能连上的那个文件。
+`grep` 分支同理，`sshd` 的命中从 3 条掉到 2 条。
+
+修法：两个分支的 `rg` 调用都加 `--hidden`。**但不加 `--no-ignore`** —— 跳过
+`node_modules` 正是 `glob` 有用的原因，去掉它等于用「一个错误答案」换「一屏 200 行
+vendored manifest」。所以两个分支在「忽略的那部分」上仍然不同，这是**有意的不对称**：
+「搜索工具尊重 .gitignore」是能站住的契约，而「隐藏的配置目录不可见」不能。
+
+顺带修了测试自己的一个假阳性：`globCommand` 原本用 `find . -type f` 定位，而
+`glob` 命令里 `||` 的兜底分支**永远**包含这段文字，于是它抓到的是兜底而不是 rg 那段，
+断言在真实回退下依然「通过」。改成用 `--files` 定位（只有 `glob` 会传这个参数）。
+
+**容器里要不要装 `rg`**：装了更好，工具会走 `rg` 分支；不装也不会错，`grep` 兜底覆盖
+同样的范围。本机的 Codespace 已用 `sudo apt-get install -y ripgrep` 装上（13.0.0），
+但**它是容器内的临时状态**，重建 Codespace 就没了 —— 想长期保留就写进
+`devcontainer.json` 的 `features` 或 `postCreateCommand`。
 
 ### 0.1.4：三个「注册全成功、每次调用全失败」的装配缺陷
 

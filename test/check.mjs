@@ -1311,13 +1311,54 @@ if (!ensurePeers()) {
   await globTool.execute({ pattern: '**/*.json' }, {})
 
   const grepCommand = searchCommands.find((c) => typeof c === 'string' && c.includes('grep'))
-  const globCommand = searchCommands.find((c) => typeof c === 'string' && c.includes('find . -type f'))
+  // Anchor on `rg --files`, the form ONLY the glob tool emits. Two near-miss
+  // anchors were tried and both were wrong:
+  //   `find . -type f` -> every glob command contains the `||` fallback, so it
+  //                       matched that instead of the rg branch;
+  //   `rg --`          -> grep's rg branch also starts with `rg --`, so it
+  //                       captured the grep command.
+  // `rg --files` is unambiguous, and the `--hidden` flag sits BEFORE it, so the
+  // assertions below check the whole `<flags> --files` prefix instead.
+  // Anchor on `--files`, which ONLY the glob tool passes. Every earlier anchor
+  // failed for a different reason: `find . -type f` also appears in glob's own
+  // `||` fallback, `rg --` also starts grep's rg branch, and `rg --files` never
+  // matches because the real command is `rg --hidden --files`.
+  const globCommand = searchCommands.find((c) => typeof c === 'string' && c.includes('--files'))
   check(grepCommand !== undefined && grepCommand.includes('command -v rg'),
     'grep branches on whether rg exists', grepCommand)
   check(grepCommand !== undefined && grepCommand.includes('grep -rEn'),
     '  -> and falls back to a recursive grep', grepCommand)
   check(globCommand !== undefined && globCommand.includes('|| true'),
     'glob tolerates an unreadable subdirectory', globCommand)
+
+  /* ---------------------------------------------------------------- *
+   * 5f-ter. Both branches of a search tool must agree on hidden paths.
+   *
+   * `rg` skips hidden files and directories by DEFAULT; `grep -r` does not.
+   * That asymmetry is invisible until a repository hides something that
+   * matters, and this one hides the single most important file it has:
+   * `.devcontainer/devcontainer.json` decides whether the Codespace can be
+   * reached at all. Measured live on the real Codespace:
+   *
+   *   rg --files -g '*.json'          -> 5 paths   (no .devcontainer)
+   *   rg --hidden --files -g '*.json' -> 6 paths   (.devcontainer present)
+   *
+   * So installing `rg` in the container silently SHORTENED the answers the
+   * tools gave. The flags below are what keeps the two branches honest.
+   * ---------------------------------------------------------------- */
+
+  check(grepCommand !== undefined && grepCommand.includes('--hidden'),
+    'the rg grep branch is told to include hidden paths', grepCommand)
+  check(globCommand !== undefined && /rg\s+--hidden\s+--files/.test(globCommand),
+    'the rg glob branch is told to include hidden paths', globCommand)
+
+  // `.gitignore` must STILL be honoured: skipping node_modules is what makes
+  // glob usable. Dropping the ignore rules would trade one wrong answer for a
+  // 200-line wall of vendored manifests.
+  check(grepCommand !== undefined && !grepCommand.includes('--no-ignore'),
+    '  -> but .gitignore is still honoured (no --no-ignore)', grepCommand)
+  check(globCommand !== undefined && !globCommand.includes('--no-ignore'),
+    '  -> and glob honours it too', globCommand)
 
   /* ---------------------------------------------------------------- *
    * 5f-bis. A matching LINE may contain colons.
