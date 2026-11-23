@@ -113,9 +113,19 @@ Service name is **`workspaceRegistry`** (`WorkspaceRegistry extends Service`,
   that agent's scope, which shadows a same-named global for that agent only.
   This is the supported per-agent seam (`dsh-tools`: "for a per-agent variant,
   register through that agent's `agent.ctx`").
-* `ctx.tools.restrict(name, …)` requires a scoped context and removes a tool for
-  that agent. Use it to hide `pwsh` for a Codespace agent (Linux) and to keep
-  the local `read`/`write`/`edit`/`bash`/`glob`/`grep` from being used.
+* `ctx.tools.restrict({ deny: [...] })` requires a scoped context and removes an
+  **inherited** tool for that agent. Use it to hide `pwsh` for a Codespace agent
+  (Linux) and to keep the local `read`/`write`/`edit`/`bash`/`glob`/`grep` from
+  being used. Two traps, both measured:
+  * it throws on a name that is not inherited (scope-local registrations and
+    unknown names are rejected), so filter the list against what the agent can
+    see **before** registering our own same-named tools;
+  * "what the agent can see" must be read as `tools.get(name, agent)` (or
+    `tools.view(agent)`), **not** `tools.get(name)`. The no-scope read is the
+    context-GLOBAL layer only, and a shipped preset mounts `read`/`pwsh`/… on its
+    own scope, which is an ANCESTOR of the agent — so the global view is empty for
+    exactly the tools this filter is about, `deny` comes out `[]`, and the local
+    `pwsh` survives. `dsh-tools` records the same lesson in `view()`'s docs.
 * `agent/created` is a **serial** event; listeners get the agent. Register
   per-agent behaviour on `agent.ctx` inside one `agent.ctx.effect()` **and**
   keep that disposer keyed by agent in our own plugin effect, because unloading
@@ -142,8 +152,28 @@ Service name is **`workspaceRegistry`** (`WorkspaceRegistry extends Service`,
 * Tool definitions are read from `dsh-tool-fs` / `dsh-tool-bash`; our shadow
   tools must return the same `output` schema shape and render the same
   `[exit code: N]` marker contract (`parseExitStatus` lives in
-  `@deepseek-ai/dsh-shell`). **Verify the exact `register()` definition shape by
-  reading `dsh-tools`' README and `dsh-tool-fs/lib/index.js` before writing.**
+  `@deepseek-ai/dsh-shell`).
+* **Two schema dialects, and `register()` only accepts one** (this cost a whole
+  release; see README bug #14):
+  * *authoring shorthand* — what `dsh-tool-fs` is written in:
+    `{ file_path: { type: 'string', required: true } }`. Those plugins pass the
+    definition through `defineTool()`, which compiles it
+    (`parameterSchemaSpecToJsonSchema` / `valueSchemaSpecToJsonSchema`).
+  * *registry-ready raw JSON Schema* — what `register()` stores and what the
+    model is shown. `required` is an **array on the object node** and is illegal
+    on a property node; `register()` asserts it with
+    `assertSupportedJsonSchema()` and throws `JsonSchemaError`
+    (`schema.properties.x.required is not supported on type "string"`).
+  So copying `dsh-tool-fs`'s literal object and calling `register()` directly
+  fails for EVERY tool. Either run the definition through `defineTool()`, or
+  write both `parameters` and `output.schema` in the raw subset. Either way, pin
+  it with a test against a real `ToolRuntime` (`test/remote-tools.mjs`), because
+  a fake `register()` accepts anything.
+* Tool surfaces fail *per tool* inside our own `try/catch`, so a broken dialect
+  degrades to warnings. Whatever owns the user-facing claim ("this session runs
+  in the cloud") must be driven by the **install result**
+  (`onInstalled({ installed, denied, failed })`), not registered unconditionally.
+
 
 ### Host HTTP routes for the client
 
@@ -655,8 +685,13 @@ hardcoded settings nav icon. Rules:
 1. **Placeholder workspace directories.** A Codespace workspace is registered in
    DSH's own registry as a real local directory:
    `<profileHome>/codespaces/<codespace-name>/`. It exists on disk (required by
-   `realpath`) and is empty. The session `cwd` is that path, so DSH's own
-   workspace/session machinery works untouched.
+   `realpath`) and is **permanently empty**. The session `cwd` is that path, so
+   DSH's own workspace/session machinery works untouched.
+   This is a **mount point, not a mirror**: the plugin has no clone/fetch/sync
+   path at all, and the remote tools (decision 3) are what make the empty
+   directory irrelevant. Treating an empty placeholder as "the sync failed" is a
+   misreading of the design; writing files into it would be the actual bug.
+
 2. **Routing, not global replacement.** Every remote capability decides by
    looking at the session cwd / placeholder prefix. Nothing global is replaced,
    so other sessions and other plugins are unaffected (requirement 8).
@@ -664,6 +699,28 @@ hardcoded settings nav icon. Rules:
    our placeholder root, register remote implementations of the file and shell
    tools on `agent.ctx`, and restrict the local counterparts. This is the
    supported per-agent seam.
+3a. **The transport target carries `mount`, never a local cwd.** `buildTarget()`
+   returns `{ kind, codespace|alias, mount }` where `mount` is the local
+   placeholder directory. The REMOTE working root is probed once per target
+   (`remoteCwd()` in `transport.js`, `printf %s "$PWD"` — `gh codespace ssh`
+   starts inside the repository checkout) and memoized on `target.remoteCwd`.
+   Passing the Windows placeholder as the remote cwd silently made every
+   relative path resolve against `/`. A model path that names the mount is
+   rewritten under the probed root (`mapMountPath`), which is what makes the
+   local path reported by `working_directory` usable.
+3b. **The executor is the manager's.** `CodespaceManager.run` defaults to
+   `defaultRun` (real spawn) and is the single source of the `run` closure every
+   remote tool captures. Both `installSessionWiring` and
+   `installRemoteTools` fall back to `manager.run` when the caller passes no
+   `run`; a surface installed with `undefined` is dead on arrival
+   (`the gh transport requires an injected executor`). Do not re-introduce
+   `options.run`-only wiring.
+3c. **`gh codespace ssh` needs sshd inside the container.** When `gh` reports it
+   could not start the SSH server, the transport raises
+   `RemoteError('E_REMOTE_NO_SSHD')` naming the
+   `ghcr.io/devcontainers/features/sshd:1` devcontainer feature. That is an
+   environment precondition (repo change + container rebuild), not a plugin
+   workaround; never retry it as if it were transient.
 4. **One multi-step window.** The create flow is a single `shell.overlay`
    component with internal steps (repo → codespace → prebuild notice → machine),
    never a stack of dialogs.
