@@ -6,6 +6,9 @@ tmp/
 tmp-*/
 *.log
 
+# Host packages `test/remote-tools.mjs` extracts from the installed DSH archive
+test/.cache/
+
 # Editor / OS
 .vscode/
 .idea/

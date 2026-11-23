@@ -9,11 +9,80 @@ SSH 主机列表里塞任何东西，因此不会和其他云工作区插件冲�
 ```
 ┌─────────────── 本地 DSH ───────────────┐        ┌────── GitHub Codespace ──────┐
 │  侧边栏工作区行（云朵图标）              │        │                              │
-│    ▶️ / ⏸️ / 🕐  ← 启停 + 自动暂停倒计时 │  SSH   │  /workspaces/<repo>          │
+│    ▶️ / ⏸️ / 🕐  ← 启停 + 自动暂停倒计时 │  常驻  │  /workspaces/<repo>          │
 │                                        │ ─────► │    read / write / edit       │
-│  Agent 会话（cwd = 占位目录）           │        │    glob / grep / bash        │
+│  Agent 会话（cwd = 占位目录）           │ 通道   │    glob / grep / bash        │
+│                                        │        │    job_status / job_cancel   │
 └────────────────────────────────────────┘        └──────────────────────────────┘
 ```
+
+## 远程工具
+
+九个工具，全部在 Codespace 里执行，本地同名工具对该 Agent 隐藏
+（`lib/host/session.js` 的 `LOCAL_TOOL_NAMES`）。
+
+| 工具 | 用途 |
+|---|---|
+| `read` / `write` / `edit` | 读写 Codespace 里的文件 |
+| `glob` / `grep` | 在 Codespace 里找文件 / 搜内容 |
+| `bash` | 在 Codespace 里跑命令；`background: true` 变成后台任务 |
+| `job_status` | 查后台任务的进度、退出码与输出尾部 |
+| `job_cancel` | 杀掉后台任务（整进程组） |
+| `codespace_doctor` | 一次诊断连接 / sshd / 工作区根 / 工具注册 / 容器工具链 |
+
+### 常驻通道：每条命令从 6 秒降到 0.1 秒
+
+**实测（2026-11-24，同一台 Codespace）：**
+
+| 方式 | 单条命令耗时 |
+|---|---|
+| 每条命令一次 `gh codespace ssh`（0.1.x 的做法） | **5.5 – 8.1 s** |
+| 一条长连接上的 framed 协议（0.2.0） | **约 0.1 s** |
+
+差 48 倍，而且这不是微优化：每一次 `read`、`stat`、`write`、`grep` 都要付一次
+建连成本，一次 read+edit+grep 就是 16 秒纯等待。代价从来不在命令，而在于为每条
+命令重开一次 dev tunnel、一个 sshd 会话和一个 login shell。
+
+**不能用 OpenSSH 复用连接**：`gh codespace ssh` 给的是 `ProxyCommand`
+（`gh cs ssh --stdio`），`ssh -o ControlMaster=yes -N` 走它会立刻
+`Read from remote host …: Unknown error` 退出，连 socket 都不留。唯一可行的复用
+位置是上一层：把远端自己保持活着，说一个极小的分帧协议。
+
+```
+请求   e <命令, base64>\n
+响应   H ok 1 <退出码> 0 0\n
+       O <stdout, base64>\n
+       E <stderr, base64>\n
+```
+
+全程 base64，所以含换行、引号、`$()` 的命令不可能把分帧搞乱。每条远端命令都跑
+`bash -c <cmd> </dev/null`：远端 `cat` 吞不掉协议流，读 stdin 的命令也立刻失败而
+不是挂到超时。
+
+### 后台任务：长构建不再靠猜超时
+
+`bash background: true` 立刻返回 job id，进程用 `setsid` 脱离会话，**即使通道断了、
+DSH 重启了，任务仍在跑**。状态是 Codespace 里的几个文件（`<repo>/.dsh-jobs/<id>/`
+里的 `cmd` / `stdout` / `stderr` / `exit` / `pid`），所以 `job_status` 只是 `cat`，
+换个通道也能读。
+
+这样做的理由是场景：一次 20 分钟的 Gradle 构建，最怕的恰恰是连接断掉——那种情况下
+「进程守住」的方案会同时丢掉工作和「它曾经存在」的记录。
+
+### `codespace_doctor`
+
+这个工具存在的唯一原因是这个插件**真实的故障形态**：三种完全不同的原因
+（没有 sshd / Host 进程比插件旧 / 占位目录根对不上）在界面上表现**一模一样**——
+插件显示 active，UI 正常，模型还拿着本地工具，唯一的症状是 `read` 报 not found。
+
+它按「能排除最多原因」的顺序问五个问题：会话真的是 Codespace 会话吗、宿主能不能连上
+（以及多快）、容器有没有 `gh codespace ssh` 需要的东西、容器有没有远程工具假设的东西
+（`rg` / `git`）、远程工具到底注册上了没有。
+
+`setupGh: true` 会把 GitHub CLI 装进容器并用本 profile 的 token 认证它。这一条解决的是
+插件**没有别的路可走**的那件事：Codespace 里的 `origin` 是 HTTPS remote、没有凭据助手，
+所以裸的 `git push` 会 `could not read Username`。token 走 base64 参数
+（`bash -s -- <b64>`），不进容器里的 `ps`。
 
 ## 功能
 
@@ -238,12 +307,12 @@ test/
 
 ## 验证
 
-四套离线自检（不需要 token、`gh` 或真实 Codespace），加一套需要令牌的联网自检：
+四套离线自检（不需要 token、`gh` 或真实 Codespace），加四套需要真实 Codespace 的联网自检：
 
 ```bash
 # Node 侧：包清单与打包白名单、Config 默认值、RPC 动作表与 HTTP 守卫、
 # 工作区命名、发消息前的就绪检查、shell 引用、文案一致性
-node test/check.mjs                # 230 项，全通过
+node test/check.mjs                # 246 项，全通过
 
 # 退出即停：对着真实 CodespaceManager 跑，只把 fetch 换成桩
 node test/shutdown.mjs             # 31 项，全通过
@@ -256,9 +325,28 @@ node test/e2e.mjs                  # 全通过（找不到已安装的 Harness �
 node test/serve.mjs                # 然后打开 http://127.0.0.1:19501/
                                    # 217 项，全通过
 
+# ---- 以下四套需要一个正在运行的 Codespace，参数是它的名字 ----
+
 # 联网：用 gh 的令牌打真实 GitHub API（无令牌时自动 SKIP）
 node test/live.mjs
+
+# 常驻通道协议：预热耗时、第二条命令必须快、退出码/stdout/stderr 分帧、
+# 引号密集的命令、远端 cat 不能吞协议流、unicode、后台任务全套、断线存活
+node test/live-channel.mjs <codespace>
+
+# 真实工具面：与 agent 同一份定义，走同一条传输——doctor、bash、
+# 后台任务全生命周期，最后量 5 次前台调用的平均耗时
+node test/live-tools.mjs <codespace>
+
+# 容器里装 gh + 认证：不仅断言脚本退出码，还要断言**可观测结果**——
+# 容器里 gh auth status 通过、在 checkout 里 git ls-remote 不再要凭据
+node test/live-setup-gh.mjs <codespace>
 ```
+
+**为什么后面三套要单列**：通道、后台任务、gh 认证全都在「离线能测的边界」之外——它们的
+失败形态是**静默**的（通道打开了、退出码 0、一个字节都没答；后台任务在跑而 `job_status`
+说 missing；`gh auth login` 退出 0 而 hosts.yml 没写出来）。三种都在这台机器上真实发生过，
+三种都只有拿真容器跑一遍才会显形。
 
 `test/live.mjs` 是唯一会碰网络的一套，它存在的理由很具体：离线套件看不见本机那个
 **TLS 拦截**故障——中间人根证书只在 Windows 系统信任库里，Node 的 `fetch` 只信自带
@@ -991,6 +1079,18 @@ cat     v2
 
 ## 已知限制
 
+- **常驻通道是「每个 Codespace 一条」的，串行执行**。协议是严格一问三答，所以同一通道上
+  的命令排队；0.1 秒一条时这不是问题，但它也是后台任务存在的理由——**长任务绝不能占着
+  这条队列**。
+- **通道超时会丢掉整条连接**。远端 bash 还在跑那条命令，协议里没有中断原语，所以诚实的
+  恢复方式是把连接扔掉、让下一条命令重开。后台任务不受影响：它们 `setsid` 脱离了会话、
+  写文件在磁盘上。
+- **后台任务的输出不设上限**，直接 append 到文件。一个打印几百 GB 的构建会写满磁盘
+  （这台 Codespace 剩约 24 GB）。`job_status` 因此只回**尾部**并附上总字节数，让模型能
+  判断被截断了。
+- **`codespace_doctor({setupGh:true})` 改的是运行中的容器**，重建 Codespace 后要再跑一次
+  （`gh` 装在 `/usr/local/bin`，不在镜像里）。想让它是永久的，得写进仓库的
+  `devcontainer.json`——那属于仓库，不属于插件。
 - **工作区分组标题栏的图标行、以及工作区行，都没有官方插槽**。DSH 把「添加工作区」
   按钮和 `ProjectRowItem` 的操作按钮、文件夹图标全部写死，因此以下四处通过 DOM 增强
   实现（与 `dsh-pet` 处理设置导航图标同一手法）：标题栏里的新建按钮、行首云朵、

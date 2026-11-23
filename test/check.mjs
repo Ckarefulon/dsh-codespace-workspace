@@ -529,8 +529,15 @@ if (!ensurePeers()) {
       manager: remoteManager, workspaceId: 'ws-1', target: { kind: 'gh', codespace: 'cs', cwd: '/workspace' },
       localToolNames: ['read', 'glob', 'bash', 'pwsh'],
     })
-    eq('with tools ready, all six remote tools are registered',
-      fake.registered.join(','), 'read,write,edit,glob,grep,bash')
+    /*
+     * Nine, not six: `codespace_doctor`, `job_status` and `job_cancel` joined
+     * the surface. Asserted as an exact list on purpose — the failure these
+     * lines guard against is a tool that never reaches the registry, and a
+     * `length > 0` check would pass while the model silently kept its LOCAL
+     * tools against an empty placeholder directory.
+     */
+    eq('with tools ready, all nine remote tools are registered',
+      fake.registered.join(','), 'codespace_doctor,read,write,edit,glob,grep,bash,job_status,job_cancel')
     check(fake.restricted.length === 1, 'and the local counterparts are restricted away')
     eq('  -> the deny list covers the local names',
       JSON.stringify(fake.restricted[0].deny), JSON.stringify(['read', 'glob', 'bash', 'pwsh']))
@@ -557,7 +564,7 @@ if (!ensurePeers()) {
     // The service appears; the deferred callback must now do the work.
     cbHolder.cb({ tools: fake.toolsService })
     eq('when tools arrives, the remote surface is installed',
-      fake.registered.join(','), 'read,write,edit,glob,grep,bash')
+      fake.registered.join(','), 'codespace_doctor,read,write,edit,glob,grep,bash,job_status,job_cancel')
     check(fake.restricted.length === 1, '  -> and the local tools are hidden')
     dispose()
     check(true, 'the deferred disposer ran without throwing')
@@ -838,7 +845,8 @@ if (!ensurePeers()) {
       target: { kind: 'gh', codespace: 'cs', cwd: '/workspace' },
       localToolNames: ['read', 'write', 'edit', 'glob', 'grep', 'bash', 'pwsh', 'read_image'],
     })
-    eq('every remote tool passes the registry gate', accepted.join(','), 'read,write,edit,glob,grep,bash')
+    eq('every remote tool passes the registry gate',
+      accepted.join(','), 'codespace_doctor,read,write,edit,glob,grep,bash,job_status,job_cancel')
     eq('  -> and none was rejected', JSON.stringify(rejected), '[]')
     eq('  -> and no warning was logged', JSON.stringify(warnings), '[]')
   }
